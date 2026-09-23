@@ -61,13 +61,28 @@ if [[ "${controller_address}" == "127.0.0.1" || "${controller_address}" == "loca
   jwks_block="      jwks:
         url: http://127.0.0.1:8080/.well-known/jwks.json"
 else
+  # v1.4.1's jwtAuth/LocalJwtConfig schema has additionalProperties:false and
+  # its jwks field only accepts {url|file|inline} - no CA/insecure option
+  # anywhere in it, and the sibling `backendTLS` policy (which does have one)
+  # isn't a recognized field inside llm.policies either (both confirmed by
+  # hitting the actual schema validator, not guessed). So instead of having
+  # agentgateway fetch JWKS itself over HTTPS (which needs TLS trust we can't
+  # configure), we fetch it once ourselves - using the CA trust we already
+  # know works - and hand it a local file. JWKS is public key material, not
+  # secret, so this is a fine trade: a point-in-time snapshot instead of a
+  # live fetch, refreshed by just re-running this script.
   device_ca="${keys_dir}/device-ca.pem"
   [[ -f "${device_ca}" ]] || die "No local copy of the controller's device-ca.pem at ${device_ca}. Copy it from the controller machine first (see scripts/22-export-controller-ca.sh there) before running this with --controller-address."
+  jwks_path="${config_dir}/controller-jwks.json"
+  curl --fail --silent --show-error --cacert "${device_ca}" \
+    "https://${controller_address}:8443/.well-known/jwks.json" --output "${jwks_path}" \
+    || die "Could not fetch JWKS from https://${controller_address}:8443/.well-known/jwks.json - is the controller running and reachable?"
+  jq -e '.keys | length > 0' "${jwks_path}" >/dev/null \
+    || die "Fetched JWKS from the controller but it has no keys - check the controller's gatewayJwt config"
   jwks_block="      jwks:
-        url: https://${controller_address}:8443/.well-known/jwks.json
-      root: /etc/agentgateway/controller-ca.pem"
-  ca_mount_args=(-v "${device_ca}:/etc/agentgateway/controller-ca.pem:ro")
-  log_warn "jwks.root (CA trust) assumes the same field name as agentgateway's LocalJwtConfig.Issuer schema on main - not yet verified against the pinned v1.4.1 image. If the JWKS fetch fails with a TLS trust error, this is the first thing to check."
+        file: /etc/agentgateway/controller-jwks.json"
+  ca_mount_args=(-v "${jwks_path}:/etc/agentgateway/controller-jwks.json:ro")
+  log_success "Fetched controller JWKS to ${jwks_path} (mounted as a local file - sidesteps agentgateway v1.4.1 having no CA-trust option for a live HTTPS fetch)"
 fi
 
 mkdir -p "${config_dir}"
@@ -138,7 +153,7 @@ docker run -d \
   --restart unless-stopped \
   -e ANTHROPIC_API_KEY \
   -v "${config_dir}/agentgateway.yaml:/etc/agentgateway/config.yaml:ro" \
-  "${ca_mount_args[@]:-}" \
+  "${ca_mount_args[@]+"${ca_mount_args[@]}"}" \
   "${image}" -f /etc/agentgateway/config.yaml >/dev/null
 
 log_step "Waiting for agentgateway to answer its reachability route"
