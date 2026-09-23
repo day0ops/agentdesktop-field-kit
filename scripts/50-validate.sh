@@ -49,11 +49,15 @@ else
   check_fail "Docker daemon is not running"
 fi
 
-check_start "Controller fleet API TLS (127.0.0.1:8443)"
+controller_address="${CONTROLLER_PUBLIC_ADDRESS:-127.0.0.1}"
+is_remote_controller=false
+[[ "${controller_address}" != "127.0.0.1" && "${controller_address}" != "localhost" ]] && is_remote_controller=true
+
+check_start "Controller fleet API TLS (${controller_address}:8443)"
 device_ca="${STATE_DIR}/keys/device-ca.pem"
 if [[ -f "${device_ca}" ]]; then
-  if openssl s_client -connect 127.0.0.1:8443 -servername localhost \
-      -CAfile "${device_ca}" -verify_hostname localhost -verify_return_error -alpn h2 \
+  if openssl s_client -connect "${controller_address}:8443" -servername "${controller_address}" \
+      -CAfile "${device_ca}" -verify_hostname "${controller_address}" -verify_return_error -alpn h2 \
       </dev/null >/tmp/.agentdesktop-tls-check.$$ 2>&1; then
     if grep -q 'ALPN protocol.*h2' /tmp/.agentdesktop-tls-check.$$; then
       check_pass "TLS handshake verified, ALPN h2 negotiated"
@@ -66,22 +70,30 @@ if [[ -f "${device_ca}" ]]; then
   fi
   rm -f /tmp/.agentdesktop-tls-check.$$
 else
-  check_skip "No device CA at ${device_ca} (run 20-controller-up.sh)"
+  check_skip "No device CA at ${device_ca} - run 20-controller-up.sh (controller machine) or copy it from there via 22-export-controller-ca.sh (other machine)"
 fi
 
-check_start "Controller admin UI (127.0.0.1:8080)"
+check_start "Controller admin UI (127.0.0.1:8080, always loopback-only by design)"
 if curl --silent --output /dev/null --max-time 3 http://127.0.0.1:8080/; then
   check_pass "Admin UI is reachable"
+elif [[ "${is_remote_controller}" == "true" ]]; then
+  check_skip "Not reachable here - expected, the controller is on a different machine (${controller_address}); admin UI is loopback-only by design"
 else
   check_fail "Admin UI not reachable on http://127.0.0.1:8080/"
 fi
 
 check_start "Gateway JWKS endpoint"
-jwks="$(curl --silent --max-time 3 --fail http://127.0.0.1:8080/.well-known/jwks.json 2>/dev/null)"
-if [[ -n "${jwks}" ]] && jq -e '.keys | length > 0' <<<"${jwks}" >/dev/null 2>&1; then
-  check_pass "JWKS published with at least one key"
+if [[ "${is_remote_controller}" == "true" ]]; then
+  jwks_url="https://${controller_address}:8443/.well-known/jwks.json"
+  jwks="$([[ -f "${device_ca}" ]] && curl --silent --max-time 3 --fail --cacert "${device_ca}" "${jwks_url}" 2>/dev/null)"
 else
-  check_fail "JWKS endpoint not reachable or empty"
+  jwks_url="http://127.0.0.1:8080/.well-known/jwks.json"
+  jwks="$(curl --silent --max-time 3 --fail "${jwks_url}" 2>/dev/null)"
+fi
+if [[ -n "${jwks}" ]] && jq -e '.keys | length > 0' <<<"${jwks}" >/dev/null 2>&1; then
+  check_pass "JWKS published with at least one key (${jwks_url})"
+else
+  check_fail "JWKS endpoint not reachable or empty (${jwks_url})"
 fi
 
 check_start "agentgateway reachability (127.0.0.1:4000)"
