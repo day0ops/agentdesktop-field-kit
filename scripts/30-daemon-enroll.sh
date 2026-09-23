@@ -10,25 +10,34 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: 30-daemon-enroll.sh [--version vX.Y.Z] [--dry-run]
+Usage: 30-daemon-enroll.sh [--controller-address ADDR] [--version vX.Y.Z] [--dry-run]
 
 Defaults to the latest GitHub release. Installs to /usr/local/bin/agentdesktop
 (requires sudo). Writes the bootstrap config to state/config/daemon-bootstrap.yaml.
+
+--controller-address defaults to state/demo.env's CONTROLLER_PUBLIC_ADDRESS,
+then 127.0.0.1. Only needs setting explicitly when the controller runs on a
+different machine than this daemon.
 EOF
 }
 
 version=""
 repo="agentdesktop-dev/agentdesktop"
 install_path="/usr/local/bin/agentdesktop"
+controller_address=""
 
 while (( $# > 0 )); do
   case "$1" in
+    --controller-address) controller_address="$2"; shift 2 ;;
     --version) version="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) log_error "Unknown argument: $1"; usage >&2; exit 2 ;;
   esac
 done
+
+load_env_file
+controller_address="${controller_address:-${CONTROLLER_PUBLIC_ADDRESS:-127.0.0.1}}"
 
 require_macos
 require_cmd curl
@@ -62,7 +71,7 @@ if [[ "${DRY_RUN}" == "true" ]]; then
 [dry-run] would install to ${install_path} (requires sudo)
 [dry-run] would write ${bootstrap_path}:
             controller:
-              address: https://127.0.0.1:8443
+              address: https://${controller_address}:8443
               caCertificatePath: ${controller_ca}
               heartbeatInterval: 30s
 EOF
@@ -109,7 +118,7 @@ log_step "Writing daemon bootstrap config"
 mkdir -p "$(dirname "${bootstrap_path}")"
 cat > "${bootstrap_path}" <<EOF
 controller:
-  address: https://127.0.0.1:8443
+  address: https://${controller_address}:8443
   caCertificatePath: ${controller_ca}
   heartbeatInterval: 30s
 EOF

@@ -25,7 +25,7 @@ EOF
 
 group_id=""
 version=""
-controller_address="https://127.0.0.1:8443"
+controller_address=""
 repo="agentdesktop-dev/agentdesktop"
 
 while (( $# > 0 )); do
@@ -42,6 +42,7 @@ done
 load_env_file
 group_id="${group_id:-${INTUNE_PILOT_GROUP_ID:-}}"
 [[ -n "${group_id}" ]] || die "No group id given and none found in state. Run 40-intune-groups.sh first, or pass --group-id."
+controller_address="${controller_address:-https://${CONTROLLER_PUBLIC_ADDRESS:-127.0.0.1}:8443}"
 
 device_ca="${STATE_DIR}/keys/device-ca.pem"
 [[ -f "${device_ca}" ]] || die "Device CA not found at ${device_ca}. Run 20-controller-up.sh first."
@@ -60,10 +61,14 @@ fetch_hash() {
   local asset=$1 url
   url="$(jq -r --arg n "${asset}.sha256" '.assets[] | select(.name == $n) | .browser_download_url' <<<"${release_json}")"
   [[ -n "${url}" ]] || die "Could not find ${asset}.sha256 in release ${resolved_version}"
-  curl --fail --silent --show-error "${url}" | awk '{print $1}'
+  curl --fail --silent --show-error --location "${url}" | awk '{print $1}'
 }
 sha_arm64="$(fetch_hash agentdesktop-darwin-arm64)"
 sha_amd64="$(fetch_hash agentdesktop-darwin-amd64)"
+for pair in "arm64:${sha_arm64}" "amd64:${sha_amd64}"; do
+  arch_name="${pair%%:*}" hash_value="${pair#*:}"
+  [[ "${hash_value}" =~ ^[0-9a-f]{64}$ ]] || die "Fetched ${arch_name} checksum is not a valid sha256 hash: '${hash_value}'. A bad hash here would make the pushed script fail checksum verification on every device, every run - refusing to push it."
+done
 log_success "Resolved ${resolved_version} (arm64 ${sha_arm64:0:12}..., amd64 ${sha_amd64:0:12}...)"
 
 generated_dir="${STATE_DIR}/generated"
@@ -222,4 +227,5 @@ unset GRAPH_BEARER_TOKEN
 
 echo
 log_success "Intune shell script pushed and assigned to group ${group_id}."
-log_warn "Sync is not instant. On the pilot Mac after Intune enrollment, you can force a check-in with: sudo profiles renew -type enrollment"
+log_warn "Sync is not instant. On the pilot Mac after Intune enrollment, force a check-in with: sudo killall IntuneMdmAgent"
+log_warn "(Not 'profiles renew -type enrollment' - that's DEP-only and errors on user/Company-Portal enrollment.)"

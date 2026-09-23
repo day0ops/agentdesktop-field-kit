@@ -7,7 +7,13 @@ A guided wizard to stand up an [agentdesktop](https://agentdesktop.dev) demo on 
 
 ## Architecture
 
+Single machine (default):
+
 ![Architecture diagram](images/architecture.png)
+
+Controller and agentgateway/daemon split across two machines (see "Two-machine setup" below):
+
+![Multi-machine architecture diagram](images/architecture-multi-machine.png)
 
 ## Prerequisites
 
@@ -32,6 +38,17 @@ Guided, resumable wizard. It remembers which steps are already done (in `state/w
 - `./run-demo.sh --reset` - clear all recorded progress and start over from the first step.
 
 Or run any `scripts/NN-*.sh` standalone - all support `--dry-run` and `--help`.
+
+## Two-machine setup
+
+Controller and agentgateway/daemon can run on separate machines instead of all on one. 
+
+- On the controller machine: `./run-demo.sh --role controller` 
+- On the other machine: `./run-demo.sh --role gateway`
+
+Each `--role` only shows the steps relevant to that machine; shared cloud/Entra/Intune steps run (cheaply, idempotently) on both. The wizard prompts once for the address the other machine uses to reach the controller (LAN IP, Tailscale hostname, etc.) and stores it as `CONTROLLER_PUBLIC_ADDRESS` in `state/demo.env` - every script picks it up automatically from there afterward, or accepts it directly via `--controller-address`.
+
+After `controller-up` finishes, run `scripts/22-export-controller-ca.sh` on the controller machine and follow its printed instructions to copy the (public, non-secret) device CA cert over to the other machine's `state/keys/device-ca.pem` - required before `agentgateway-up`/`daemon-prepare`/`intune-push` will trust the controller over the network.
 
 ## What gets created
 

@@ -13,11 +13,17 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: 20-controller-up.sh [--image-tag TAG] [--recreate] [--dry-run]
+Usage: 20-controller-up.sh [--controller-address ADDR] [--image-tag TAG] [--recreate] [--dry-run]
 
 Renders controller.yaml/daemon.yaml from state/demo.env (OIDC_ISSUER,
 OIDC_CLIENT_ID - written by 10-entra-app.sh), generates local dev TLS/CA/JWT
 keys on first run, and starts the controller container.
+
+--controller-address is only needed when the daemon/agentgateway will run on
+a DIFFERENT machine than the controller (e.g. reached over Tailscale/LAN).
+It's baked into the TLS cert as an additional SAN so remote clients can
+validate the connection. Defaults to loopback-only (127.0.0.1/localhost),
+which is all a single-machine demo needs.
 EOF
 }
 
@@ -25,9 +31,11 @@ image_repo="ghcr.io/agentdesktop-dev/agentdesktop-controller"
 image_tag="v0.1.1"
 container_name="agentdesktop-controller"
 recreate=false
+controller_address=""
 
 while (( $# > 0 )); do
   case "$1" in
+    --controller-address) controller_address="$2"; shift 2 ;;
     --image-tag) image_tag="$2"; shift 2 ;;
     --recreate) recreate=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
@@ -39,6 +47,7 @@ done
 load_env_file
 : "${OIDC_ISSUER:?Run 10-entra-app.sh first (missing OIDC_ISSUER in state/demo.env)}"
 : "${OIDC_CLIENT_ID:?Run 10-entra-app.sh first (missing OIDC_CLIENT_ID in state/demo.env)}"
+controller_address="${controller_address:-${CONTROLLER_PUBLIC_ADDRESS:-}}"
 
 keys_dir="${STATE_DIR}/keys"
 config_dir="${STATE_DIR}/config"
@@ -70,11 +79,28 @@ key_files=(controller.pem controller-key.pem device-ca.pem device-ca-key.pem gat
 existing_keys=0
 for f in "${key_files[@]}"; do [[ -e "${keys_dir}/${f}" ]] && existing_keys=$((existing_keys + 1)); done
 
-if (( existing_keys == ${#key_files[@]} )); then
+address_changed=false
+if [[ -n "${controller_address}" && "${controller_address}" != "${CONTROLLER_PUBLIC_ADDRESS:-}" ]]; then
+  address_changed=true
+fi
+
+if (( existing_keys == ${#key_files[@]} )) && [[ "${address_changed}" == "false" ]]; then
   log_success "Keys already present in ${keys_dir}, reusing"
-elif (( existing_keys > 0 )); then
+elif (( existing_keys > 0 )) && (( existing_keys != ${#key_files[@]} )); then
   die "${keys_dir} has an incomplete key set (${existing_keys}/${#key_files[@]} files). Remove it and re-run to regenerate."
 else
+  if [[ "${address_changed}" == "true" ]]; then
+    log_step "Controller address changed (or newly set) to '${controller_address}' - regenerating cert with that SAN"
+    rm -f "${keys_dir}"/*.pem
+  fi
+  extra_san=""
+  if [[ -n "${controller_address}" ]]; then
+    if [[ "${controller_address}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      extra_san=",IP:${controller_address}"
+    else
+      extra_san=",DNS:${controller_address}"
+    fi
+  fi
   work_dir="$(mktemp -d)"
   trap 'rm -rf "${work_dir}"' EXIT
 
@@ -105,12 +131,12 @@ prompt = no
 [subject]
 CN = localhost
 EOF
-  cat > "${work_dir}/controller.ext" <<'EOF'
+  cat > "${work_dir}/controller.ext" <<EOF
 [v3_server]
 basicConstraints = critical,CA:FALSE
 keyUsage = critical,digitalSignature,keyEncipherment
 extendedKeyUsage = serverAuth
-subjectAltName = DNS:localhost,IP:127.0.0.1
+subjectAltName = DNS:localhost,IP:127.0.0.1${extra_san}
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid,issuer
 EOF
@@ -128,6 +154,10 @@ EOF
   rm -rf "${work_dir}"
   trap - EXIT
   log_success "Generated dev keys in ${keys_dir}"
+fi
+
+if [[ -n "${controller_address}" ]]; then
+  env_file_set CONTROLLER_PUBLIC_ADDRESS "${controller_address}"
 fi
 
 log_step "Rendering controller.yaml and daemon.yaml"
@@ -238,7 +268,11 @@ if [[ "${ready}" != "true" ]]; then
   die "Controller startup failed. Check the logs above (common causes: OIDC issuer unreachable, bad config)."
 fi
 
-log_success "Controller is up: fleet API on https://127.0.0.1:8443, admin UI on http://127.0.0.1:8080"
+fleet_host="${controller_address:-127.0.0.1}"
+log_success "Controller is up: fleet API on https://${fleet_host}:8443, admin UI on http://127.0.0.1:8080 (loopback-only, always local)"
+if [[ -n "${controller_address}" ]]; then
+  log_warn "Remote daemon/agentgateway will need a copy of ${keys_dir}/device-ca.pem (public cert, not secret) - see scripts/22-export-controller-ca.sh"
+fi
 env_file_set CONTROLLER_ADMIN_URL "http://127.0.0.1:8080"
-env_file_set CONTROLLER_FLEET_ADDRESS "https://127.0.0.1:8443"
+env_file_set CONTROLLER_FLEET_ADDRESS "https://${fleet_host}:8443"
 env_file_set DEVICE_CA_PATH "${keys_dir}/device-ca.pem"
