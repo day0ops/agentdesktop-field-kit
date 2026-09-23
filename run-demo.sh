@@ -12,16 +12,34 @@ PROGRESS_FILE="${STATE_DIR}/wizard-progress"
 
 usage() {
   cat <<'EOF'
-Usage: run-demo.sh [--reset] [--from STEP_ID]
+Usage: run-demo.sh [--role controller|gateway] [--reset] [--from STEP_ID]
 
-  --reset          Clear all progress and start from the beginning.
-  --from STEP_ID   Jump straight to a step (see step ids in the source).
+  --role controller  Only the steps needed on the machine running the
+                      Docker-based controller: preflight, cloud/Entra/Intune
+                      admin steps, controller-up, validate.
+  --role gateway      Only the steps needed on the machine running
+                      agentgateway + the enrolled daemon: preflight,
+                      cloud/Entra/Intune admin steps, agentgateway-up,
+                      daemon-prepare/enroll, intune-groups/push/enroll,
+                      validate.
+  (no --role)         Run everything - the original single-machine flow.
+  --reset             Clear all progress and start from the beginning.
+  --from STEP_ID      Jump straight to a step (see step ids in the source).
 EOF
 }
 
 from_step=""
+role=""
 while (( $# > 0 )); do
   case "$1" in
+    --role)
+      role="$2"
+      case "${role}" in
+        controller|gateway) ;;
+        *) echo "--role must be 'controller' or 'gateway', got: ${role}" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
     --reset) rm -f "${PROGRESS_FILE}"; shift ;;
     --from) from_step="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -31,6 +49,16 @@ done
 
 command -v gum >/dev/null 2>&1 || die "gum is required. Install with: brew install gum"
 touch "${PROGRESS_FILE}"
+
+# role_skip STEP_ROLE - same calling convention as skip_until: returns 0
+# (skip) when this step's role tag doesn't match --role, 1 (run) otherwise.
+# STEP_ROLE "both" always runs; with no --role set, everything runs
+# (preserves the original single-machine flow).
+role_skip() {
+  local step_role=$1
+  [[ -z "${role}" || "${step_role}" == "both" || "${step_role}" == "${role}" ]] && return 1
+  return 0
+}
 
 is_done()  { grep -qx "$1" "${PROGRESS_FILE}" 2>/dev/null; }
 mark_done() { is_done "$1" || echo "$1" >> "${PROGRESS_FILE}"; }
@@ -96,6 +124,9 @@ manual_step() {
 
 clear
 banner
+if [[ -n "${role}" ]]; then
+  gum style --foreground 212 "Role: ${role} (steps for the other machine are skipped automatically)"
+fi
 
 if [[ -n "${from_step}" ]]; then
   gum style --foreground 214 "Jumping to step: ${from_step} (steps before it are assumed done)"
@@ -109,6 +140,24 @@ skip_until() {
 skip_until preflight || run_auto preflight "Preflight checks" \
   "Verifies docker/az/jq/openssl are installed, Docker is running, az is Graph-authenticated, and Intune is licensed." \
   -- "${SCRIPTS_DIR}/00-preflight.sh"
+
+if [[ -n "${role}" ]]; then
+  skip_until controller-address || {
+    section controller-address "Controller address"
+    load_env_file
+    if [[ -z "${CONTROLLER_PUBLIC_ADDRESS:-}" ]]; then
+      if [[ "${role}" == "controller" ]]; then
+        prompt_text="Enter the address the OTHER (agentgateway/daemon) machine uses to reach THIS one (LAN IP, Tailscale hostname, etc.)."
+      else
+        prompt_text="Enter the address this machine uses to reach the CONTROLLER machine (LAN IP, Tailscale hostname, etc.)."
+      fi
+      gum style --foreground 245 "${prompt_text} Loopback (127.0.0.1) only works when everything's on one machine."
+      addr="$(gum input --placeholder "e.g. kasuns-macbook-pro.tail537a5d.ts.net")"
+      [[ -n "${addr}" ]] && env_file_set CONTROLLER_PUBLIC_ADDRESS "${addr}"
+    fi
+    mark_done controller-address
+  }
+fi
 
 skip_until pilot-user || {
   section pilot-user "Dedicated pilot user"
@@ -139,11 +188,11 @@ skip_until intune-licensing || manual_step intune-licensing "Intune licensing (m
 "1. Go to https://admin.microsoft.com -> Billing -> Purchase services -> 'Microsoft Intune Plan 1' -> start the Managed (user-based) trial - only if not already licensed.
 2. Visit https://intune.microsoft.com once and confirm Tenant administration -> Tenant status shows MDM Authority: Microsoft Intune and a non-zero license count."
 
-skip_until controller-up || run_auto controller-up "Controller (Docker, local, Entra-backed)" \
+skip_until controller-up || role_skip controller || run_auto controller-up "Controller (Docker, local, Entra-backed)" \
   "Generates dev TLS/CA/JWT keys, renders controller.yaml with real Entra ID as OIDC issuer, runs the controller via docker run (no Kubernetes/Postgres)." \
   -- "${SCRIPTS_DIR}/20-controller-up.sh"
 
-skip_until agentgateway-up || {
+skip_until agentgateway-up || role_skip gateway || {
   section agentgateway-up "agentgateway (live Claude Code traffic)"
   if gum confirm "Include live Claude Code traffic through agentgateway?" --default=true; then
     if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
@@ -159,12 +208,12 @@ skip_until agentgateway-up || {
   fi
 }
 
-skip_until daemon-prepare || run_auto daemon-prepare "Prepare local daemon binary" \
+skip_until daemon-prepare || role_skip gateway || run_auto daemon-prepare "Prepare local daemon binary" \
   "Downloads and checksum-verifies the released agentdesktop binary, writes the local bootstrap config." \
   -- "${SCRIPTS_DIR}/30-daemon-enroll.sh"
 
 load_env_file
-skip_until daemon-enroll || manual_step daemon-enroll "Enroll this Mac directly (manual, interactive)" \
+skip_until daemon-enroll || role_skip gateway || manual_step daemon-enroll "Enroll this Mac directly (manual, interactive)" \
 "Enrollment needs sudo and opens your browser for Entra ID sign-in, so run it yourself in a
 terminal you can watch (leave it running - it's the live daemon, not one-shot):
 
@@ -174,20 +223,26 @@ Sign in as your pilot user (${PILOT_UPN:-check state/demo.env}). This is the qui
 sanity-check path - 41-intune-push.sh below is the path that actually demonstrates
 Intune management."
 
-skip_until intune-groups || run_auto intune-groups "Intune pilot group" \
+skip_until intune-groups || role_skip gateway || run_auto intune-groups "Intune pilot group" \
   "Creates the AgentDesktop-Pilot-macOS security group and adds the pilot user." \
   -- "${SCRIPTS_DIR}/40-intune-groups.sh"
 
-skip_until intune-push || run_auto intune-push "Push Intune bootstrap script" \
+skip_until intune-push || role_skip gateway || run_auto intune-push "Push Intune bootstrap script" \
   "Renders a shell script that installs the daemon as a LaunchDaemon and writes its bootstrap config, pushes it to Intune, assigns the pilot group." \
   -- "${SCRIPTS_DIR}/41-intune-push.sh"
 
-skip_until intune-enroll || manual_step intune-enroll "Enroll the Mac in Intune (manual, interactive)" \
+skip_until intune-enroll || role_skip gateway || manual_step intune-enroll "Enroll the Mac in Intune (manual, interactive)" \
 "1. Install Company Portal from the Mac App Store (or https://go.microsoft.com/fwlink/?linkid=853070).
 2. Open Company Portal, sign in as the pilot user, and enroll this Mac (approve the
    management profile in System Settings > Privacy & Security when prompted).
-3. Sync is not instant. To force a check-in after enrolling:
-     sudo profiles renew -type enrollment
+3. Sync is not instant. This is user/Company-Portal enrollment, not DEP, so
+   'profiles renew -type enrollment' does not apply here (it'll error with
+   'No Device Enrollment configuration found' - expected, harmless, ignore
+   it). Our payload is a shell script, delivered via the Intune Management
+   Extension agent, not the base MDM profile channel, so force a combined
+   MDM + agent check-in instead:
+     sudo killall IntuneMdmAgent
+   Or from the GUI: Company Portal app -> this Mac -> the \"...\" menu -> Check Status.
 4. Confirm the push landed:
      sudo launchctl print system/dev.agentdesktop.daemon
      sudo cat /etc/agentdesktop/config.yaml"
@@ -200,4 +255,5 @@ echo
 gum style --border double --margin "1 0" --padding "1 3" --border-foreground 42 --bold \
   "Setup walkthrough complete." \
   "Re-run any step anytime with: ./run-demo.sh --from STEP_ID" \
+  "Two-machine setup? Run this with --role controller on one machine and --role gateway on the other." \
   "Rehearse the whole flow once tonight before the live demo - Intune sync timing is the main risk."

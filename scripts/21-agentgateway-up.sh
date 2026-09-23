@@ -7,20 +7,29 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: ANTHROPIC_API_KEY=sk-ant-... 21-agentgateway-up.sh [--image-tag TAG] [--recreate] [--dry-run]
+Usage: ANTHROPIC_API_KEY=sk-ant-... 21-agentgateway-up.sh [--controller-address ADDR] [--image-tag TAG] [--recreate] [--dry-run]
 
 Starts the agentgateway container (host networking, port 4000) configured to
-validate controller-issued JWTs against http://127.0.0.1:8080/.well-known/jwks.json
-and forward to Anthropic using ANTHROPIC_API_KEY. Run 20-controller-up.sh first.
+validate controller-issued JWTs and forward to Anthropic using
+ANTHROPIC_API_KEY. Run 20-controller-up.sh first.
+
+--controller-address is only needed when the controller runs on a DIFFERENT
+machine (defaults to state/demo.env's CONTROLLER_PUBLIC_ADDRESS, then
+127.0.0.1). When set, the JWKS fetch targets the controller's fleet endpoint
+(:8443, HTTPS) instead of the loopback-only admin UI, and requires a local
+copy of the controller's device-ca.pem (see scripts/22-export-controller-ca.sh
+on the controller machine) to trust that connection.
 EOF
 }
 
 image="cr.agentgateway.dev/agentgateway:v1.4.1"
 container_name="agentdesktop-agentgateway"
 recreate=false
+controller_address=""
 
 while (( $# > 0 )); do
   case "$1" in
+    --controller-address) controller_address="$2"; shift 2 ;;
     --image-tag) image="cr.agentgateway.dev/agentgateway:$2"; shift 2 ;;
     --recreate) recreate=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
@@ -29,7 +38,10 @@ while (( $# > 0 )); do
   esac
 done
 
+load_env_file
+controller_address="${controller_address:-${CONTROLLER_PUBLIC_ADDRESS:-127.0.0.1}}"
 config_dir="${STATE_DIR}/config"
+keys_dir="${STATE_DIR}/keys"
 
 if [[ "${DRY_RUN}" == "true" ]]; then
   cat <<EOF
@@ -44,12 +56,23 @@ fi
 
 : "${ANTHROPIC_API_KEY:?Set ANTHROPIC_API_KEY in your environment before running this script}"
 
-require_cmd docker "brew install --cask docker"
-docker_running || die "Docker daemon is not running. Start Docker Desktop and re-run."
+ca_mount_args=()
+if [[ "${controller_address}" == "127.0.0.1" || "${controller_address}" == "localhost" ]]; then
+  jwks_block="      jwks:
+        url: http://127.0.0.1:8080/.well-known/jwks.json"
+else
+  device_ca="${keys_dir}/device-ca.pem"
+  [[ -f "${device_ca}" ]] || die "No local copy of the controller's device-ca.pem at ${device_ca}. Copy it from the controller machine first (see scripts/22-export-controller-ca.sh there) before running this with --controller-address."
+  jwks_block="      jwks:
+        url: https://${controller_address}:8443/.well-known/jwks.json
+      root: /etc/agentgateway/controller-ca.pem"
+  ca_mount_args=(-v "${device_ca}:/etc/agentgateway/controller-ca.pem:ro")
+  log_warn "jwks.root (CA trust) assumes the same field name as agentgateway's LocalJwtConfig.Issuer schema on main - not yet verified against the pinned v1.4.1 image. If the JWKS fetch fails with a TLS trust error, this is the first thing to check."
+fi
 
 mkdir -p "${config_dir}"
-cat > "${config_dir}/agentgateway.yaml" <<'EOF'
-# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+cat > "${config_dir}/agentgateway.yaml" <<EOF
+# yaml-language-server: \$schema=https://agentgateway.dev/schema/config
 frontendPolicies:
   logging:
     add:
@@ -75,15 +98,17 @@ llm:
       mode: strict
       issuer: agentdesktop-controller
       audiences: [agentgateway]
-      jwks:
-        url: http://127.0.0.1:8080/.well-known/jwks.json
+${jwks_block}
   models:
   - name: "*"
     provider: anthropic
     params:
-      apiKey: $ANTHROPIC_API_KEY
+      apiKey: \$ANTHROPIC_API_KEY
 EOF
-log_success "Wrote ${config_dir}/agentgateway.yaml"
+log_success "Wrote ${config_dir}/agentgateway.yaml (JWKS target: ${controller_address})"
+
+require_cmd docker "brew install --cask docker"
+docker_running || die "Docker daemon is not running. Start Docker Desktop and re-run. (Config above is already prepared, so this is the only remaining blocker.)"
 
 existing_container="$(docker ps -a --filter "name=^${container_name}\$" --format '{{.Names}}' || true)"
 if [[ -n "${existing_container}" ]]; then
@@ -113,6 +138,7 @@ docker run -d \
   --restart unless-stopped \
   -e ANTHROPIC_API_KEY \
   -v "${config_dir}/agentgateway.yaml:/etc/agentgateway/config.yaml:ro" \
+  "${ca_mount_args[@]:-}" \
   "${image}" -f /etc/agentgateway/config.yaml >/dev/null
 
 log_step "Waiting for agentgateway to answer its reachability route"
