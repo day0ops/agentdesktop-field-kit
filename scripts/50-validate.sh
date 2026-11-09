@@ -16,6 +16,10 @@ check_pass() { log_success "$*"; pass=$((pass + 1)); }
 check_fail() { log_error "$*"; fail=$((fail + 1)); }
 check_skip() { log_warn "SKIP: $*"; skip=$((skip + 1)); }
 
+# Base64url (no padding), used by the rate-limit check below to self-sign a
+# throwaway test JWT.
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
 check_start "Entra ID configuration (state/demo.env)"
 if [[ -n "${OIDC_ISSUER:-}" && -n "${OIDC_CLIENT_ID:-}" ]]; then
   check_pass "App registration configured: ${OIDC_CLIENT_ID} @ ${OIDC_ISSUER}"
@@ -97,10 +101,54 @@ else
 fi
 
 check_start "agentgateway reachability (127.0.0.1:4000)"
+agentgateway_reachable=false
 if curl --silent --fail --head --max-time 3 http://127.0.0.1:4000/ >/dev/null 2>&1; then
   check_pass "agentgateway is reachable"
+  agentgateway_reachable=true
 else
   check_skip "agentgateway not reachable (expected if you skipped 21-agentgateway-up.sh)"
+fi
+
+check_start "Per-user rate limiting (agentgateway localRateLimit)"
+gateway_jwt_key="${STATE_DIR}/keys/gateway-jwt-key.pem"
+if [[ "${agentgateway_reachable}" != "true" ]]; then
+  check_skip "agentgateway not reachable (see above)"
+elif [[ ! -f "${gateway_jwt_key}" ]]; then
+  check_skip "No local gateway-jwt-key.pem at ${gateway_jwt_key} - can't self-sign a test token here (expected if the controller runs on a different machine; the limit is still enforced there)"
+else
+  # The reachability route above answers HEAD / directly and never reaches
+  # llm.policies (where localRateLimit lives), so it can't exercise the rate
+  # limit, and a real device JWT needs an interactive enrollment this script
+  # can't drive. Instead, self-sign a short-lived throwaway JWT with the same
+  # key the controller signs with (agentgateway already trusts it via the
+  # JWKS the controller serves) and fire real requests with it - issuer,
+  # audience and key path must match 21-agentgateway-up.sh's jwtAuth block.
+  ratelimit_now="$(date +%s)"
+  ratelimit_header='{"alg":"RS256","typ":"JWT","kid":"agentdesktop"}'
+  ratelimit_payload="$(printf '{"iss":"agentdesktop-controller","aud":"agentgateway","sub":"validate-ratelimit-%d-%d","iat":%d,"exp":%d}' \
+    "$$" "${ratelimit_now}" "${ratelimit_now}" "$((ratelimit_now + 300))")"
+  ratelimit_signing_input="$(printf '%s' "${ratelimit_header}" | b64url).$(printf '%s' "${ratelimit_payload}" | b64url)"
+  ratelimit_signature="$(printf '%s' "${ratelimit_signing_input}" | openssl dgst -sha256 -sign "${gateway_jwt_key}" | b64url)"
+  ratelimit_jwt="${ratelimit_signing_input}.${ratelimit_signature}"
+
+  # 25 requests against the configured 20-requests-per-60s budget (see
+  # 21-agentgateway-up.sh's localRateLimit): enough to trip it with margin.
+  # The request body is deliberately empty - we only need agentgateway to
+  # accept and count the request, not to actually reach a model.
+  ratelimit_codes=""
+  for _ in $(seq 1 25); do
+    ratelimit_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 3 \
+      --request POST http://127.0.0.1:4000/v1/messages \
+      --header "authorization: Bearer ${ratelimit_jwt}" --header 'content-type: application/json' \
+      --data '{}')"
+    ratelimit_codes="${ratelimit_codes}${ratelimit_code} "
+  done
+
+  if [[ "${ratelimit_codes}" == *"429"* ]]; then
+    check_pass "Rate limit enforced (429 seen among: ${ratelimit_codes})"
+  else
+    check_fail "No 429 after 25 rapid requests (observed: ${ratelimit_codes})"
+  fi
 fi
 
 check_start "Local daemon"
@@ -118,6 +166,22 @@ if launchctl print system/dev.agentdesktop.daemon >/dev/null 2>&1; then
   check_pass "LaunchDaemon dev.agentdesktop.daemon is loaded"
 else
   check_skip "LaunchDaemon dev.agentdesktop.daemon not loaded (expected before Intune sync completes)"
+fi
+
+check_start "Managed programs (agentdesktop status)"
+if [[ -z "${MANAGED_PROGRAMS:-}" ]]; then
+  check_skip "No managed programs recorded (15-managed-programs.sh not run)"
+elif ! command -v agentdesktop >/dev/null 2>&1; then
+  check_skip "agentdesktop binary not on PATH (run 30-daemon-enroll.sh, or it's Intune-managed only)"
+else
+  IFS=',' read -r -a managed_programs <<<"${MANAGED_PROGRAMS}"
+  for program in "${managed_programs[@]}"; do
+    if [[ "${status_output:-}" == *"${program}"* ]]; then
+      check_pass "${program} reported as managed in agentdesktop status"
+    else
+      check_fail "${program} not reported as managed in agentdesktop status"
+    fi
+  done
 fi
 
 echo
