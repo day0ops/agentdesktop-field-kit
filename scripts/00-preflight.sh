@@ -37,33 +37,34 @@ check_optional() {
   if command -v "${cmd}" >/dev/null 2>&1; then
     env_file_set "${env_var}" "true"
     log_success "${cmd} found ($(command -v "${cmd}"))"
+    return 0
   else
     env_file_set "${env_var}" "false"
     log_warn "${warning_msg}"
+    return 1
   fi
 }
 
 check_optional claude CLAUDE_CODE_PRESENT \
   "claude not found - Claude Code won't be configured as a managed program unless you pass --programs claude later"
 
-if command -v codex >/dev/null 2>&1; then
-  env_file_set CODEX_PRESENT "true"
-  log_success "codex found ($(command -v codex))"
-
+if check_optional codex CODEX_PRESENT \
+  "codex not found - Codex won't be configured as a managed program unless you pass --programs codex later"; then
   codex_output="$(codex --version 2>&1)" || codex_output=""
   version_string="$(printf '%s\n' "${codex_output}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" || version_string=""
   env_file_set CODEX_VERSION "${version_string}"
 
   if [[ -n "${version_string}" ]]; then
     IFS='.' read -r major minor patch <<<"${version_string}"
-    if [[ ${major} -lt 0 ]] || ([[ ${major} -eq 0 ]] && ([[ ${minor} -lt 153 ]] || ([[ ${minor} -eq 153 ]] && [[ ${patch} -lt 4 ]]))); then
+    major=10#${major} minor=10#${minor} patch=10#${patch}
+    if [[ ${major} -eq 0 ]] && [[ ${minor} -lt 153 ]]; then
+      log_warn "codex ${version_string} is older than 0.153.4, the version agentdesktop's subscription flow is validated against"
+    elif [[ ${major} -eq 0 ]] && [[ ${minor} -eq 153 ]] && [[ ${patch} -lt 4 ]]; then
       log_warn "codex ${version_string} is older than 0.153.4, the version agentdesktop's subscription flow is validated against"
     fi
   fi
 else
-  env_file_set CODEX_PRESENT "false"
   env_file_set CODEX_VERSION ""
-  log_warn "codex not found - Codex won't be configured as a managed program unless you pass --programs codex later"
 fi
 
 log_step "Checking Docker daemon"
