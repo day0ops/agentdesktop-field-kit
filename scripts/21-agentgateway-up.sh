@@ -18,6 +18,8 @@ CLAUDE_AUTH_MODE, CODEX_AUTH_MODE - see 15-managed-programs.sh):
   claude, subscription: the user's Claude subscription credential
   codex, api-key:       OpenAI API using OPENAI_API_KEY (must be set)
   codex, subscription:  the user's ChatGPT credential (Codex backend)
+When both programs are selected they share port 4000 and are routed by model
+name: only claude-* and gpt-* models are served (e.g. o4-mini would 404).
 Run 20-controller-up.sh first.
 
 --controller-address is only needed when the controller runs on a DIFFERENT
@@ -141,6 +143,19 @@ if [[ -n "${claude_mode}" && -n "${codex_mode}" ]]; then
   codex_model='"gpt-*"'
 fi
 
+# Subscription models only accept requests whose composite bearer was
+# unwrapped by that program's transformation below, which tags the request
+# with metadata.subscriptionProgram (the header itself is already rewritten by
+# the time model authorization runs). Without this a plain controller JWT
+# (e.g. subscription sign-in skipped) is forwarded upstream as the provider
+# credential and fails late with a provider 401.
+subscription_model_authorization() {
+  printf '    authorization:
+      rules:
+      - require: metadata.subscriptionProgram == "%s"
+' "$1"
+}
+
 models_block=""
 case "${claude_mode}" in
   api-key) models_block+="  - name: ${claude_model}
@@ -150,6 +165,7 @@ case "${claude_mode}" in
 " ;;
   subscription) models_block+="  - name: ${claude_model}
     provider: anthropic
+$(subscription_model_authorization claude)
 " ;;
 esac
 case "${codex_mode}" in
@@ -162,6 +178,7 @@ case "${codex_mode}" in
     provider: openai
     params:
       baseUrl: https://chatgpt.com/backend-api/codex
+$(subscription_model_authorization codex)
 " ;;
 esac
 
@@ -181,6 +198,8 @@ if [[ "${claude_mode}" == "subscription" ]]; then
           set:
             authorization: |
               "Bearer " + request.headers["authorization"].split(" ")[1].split(":")[1]
+          metadata:
+            subscriptionProgram: "\"claude\""
 '
 fi
 # Codex uses `replace` because both headers derive from the original
@@ -196,6 +215,8 @@ if [[ "${codex_mode}" == "subscription" ]]; then
                 "authorization": "Bearer " + parts[1],
                 "chatgpt-account-id": parts[3]
               }))
+          metadata:
+            subscriptionProgram: "\"codex\""
 '
 fi
 transformations_block=""
@@ -213,9 +234,11 @@ if [[ -n "${transformation_rules}" ]]; then
 ${transformation_rules}"
 fi
 
-# Per-user limits are keyed on jwt.email, which the controller copies from the
-# IdP's email claim. A token without it falls into one bucket shared by all
-# such users rather than being rejected.
+# Per-user limits are keyed on jwt.sub, the enrolling user's IdP subject
+# (stable across that user's devices). Not jwt.email: the controller only sets
+# it when Entra's token has an email claim, which needs the user's `mail`
+# attribute - 05-pilot-user.sh never sets it - and keyless requests would all
+# share one bucket.
 mkdir -p "${config_dir}"
 cat > "${config_dir}/agentgateway.yaml" <<EOF
 # yaml-language-server: \$schema=https://agentgateway.dev/schema/config
@@ -250,12 +273,12 @@ ${transformations_block}    localRateLimit:
       maxTokens: 20
       tokensPerFill: 20
       fillInterval: 60s
-      key: jwt.email
+      key: jwt.sub
     - type: tokens
       maxTokens: 50000
       tokensPerFill: 50000
       fillInterval: 1h
-      key: jwt.email
+      key: jwt.sub
   models:
 ${models_block%$'\n'}
 EOF
