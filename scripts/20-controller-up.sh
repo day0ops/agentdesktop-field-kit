@@ -28,7 +28,7 @@ EOF
 }
 
 image_repo="ghcr.io/agentdesktop-dev/agentdesktop-controller"
-image_tag="v0.1.1"
+image_tag="v0.6.0"
 container_name="agentdesktop-controller"
 recreate=false
 controller_address=""
@@ -180,7 +180,28 @@ daemonConfig:
   path: /etc/agentdesktop/config/daemon.yaml
 EOF
 
-cat > "${config_dir}/daemon.yaml" <<'EOF'
+# Per-program daemon.yaml fragments, empty when that program isn't managed
+# this run (MANAGED_PROGRAMS/CLAUDE_AUTH_MODE/CODEX_AUTH_MODE come from
+# 15-managed-programs.sh via load_env_file above).
+claude_program_block=""
+if [[ ",${MANAGED_PROGRAMS:-}," == *,claude,* ]]; then
+  if [[ "${CLAUDE_AUTH_MODE:-}" == "subscription" ]]; then
+    claude_program_block=$'  claudeCode:\n    companyAnnouncements: ["Managed by AgentDesktop (demo)"]\n    auth: subscription\n'
+  else
+    claude_program_block=$'  claudeCode:\n    companyAnnouncements: ["Managed by AgentDesktop (demo)"]\n    useLlmGateway: true\n'
+  fi
+fi
+
+codex_program_block=""
+if [[ ",${MANAGED_PROGRAMS:-}," == *,codex,* ]]; then
+  if [[ "${CODEX_AUTH_MODE:-}" == "subscription" ]]; then
+    codex_program_block=$'  codex:\n    auth: subscription\n'
+  else
+    codex_program_block=$'  codex:\n    useLlmGateway: true\n'
+  fi
+fi
+
+cat > "${config_dir}/daemon.yaml" <<EOF
 llmGateway:
   url: http://localhost:4000
   authentication:
@@ -194,9 +215,7 @@ telemetry:
   - tool.use
 
 programs:
-  claudeCode:
-    companyAnnouncements: ["Managed by AgentDesktop (demo)"]
-  claudeDesktop:
+${claude_program_block}${codex_program_block}  claudeDesktop:
     isLocalDevMcpEnabled: true
 EOF
 log_success "Wrote ${config_dir}/controller.yaml and daemon.yaml"
