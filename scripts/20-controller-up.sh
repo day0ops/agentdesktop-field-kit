@@ -236,20 +236,32 @@ EOF
 fi
 log_success "Host networking works"
 
+# Copy of the daemon.yaml the current container was created with, so a changed
+# program/auth-mode selection isn't silently left unserved.
+applied_daemon_config="${config_dir}/daemon.yaml.last-applied"
+stale_config_warning="${config_dir}/daemon.yaml changed since ${container_name} was created (or there's no record of what it was created with), so devices may keep getting the old managed-program config. Re-run with --recreate to apply it."
+
 existing_container="$(docker ps -a --filter "name=^${container_name}\$" --format '{{.Names}}' || true)"
 if [[ -n "${existing_container}" ]]; then
   if [[ "${recreate}" == "true" ]]; then
     log_step "Removing existing container (--recreate)"
     docker rm -f "${container_name}" >/dev/null
   else
+    config_stale=false
+    cmp -s "${config_dir}/daemon.yaml" "${applied_daemon_config}" || config_stale=true
     running="$(docker ps --filter "name=^${container_name}\$" --format '{{.Names}}' || true)"
     if [[ -n "${running}" ]]; then
-      log_success "Container ${container_name} already running; leaving it as-is (use --recreate to force)"
+      if [[ "${config_stale}" == "true" ]]; then
+        log_warn "Container ${container_name} already running, NOT recreated. ${stale_config_warning}"
+      else
+        log_success "Container ${container_name} already running with this config; leaving it as-is (use --recreate to force)"
+      fi
       exit 0
     else
       log_step "Starting existing stopped container"
       docker start "${container_name}" >/dev/null
       log_success "Started ${container_name}"
+      if [[ "${config_stale}" == "true" ]]; then log_warn "${stale_config_warning}"; fi
       exit 0
     fi
   fi
@@ -269,6 +281,7 @@ docker run -d \
   --user 65532:65532 \
   "${image_repo}:${image_tag}" \
   --config /etc/agentdesktop/config/controller.yaml >/dev/null
+cp "${config_dir}/daemon.yaml" "${applied_daemon_config}"
 
 log_step "Waiting for the controller to become reachable"
 ready=false
