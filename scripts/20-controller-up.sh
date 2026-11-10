@@ -28,7 +28,7 @@ EOF
 }
 
 image_repo="ghcr.io/agentdesktop-dev/agentdesktop-controller"
-image_tag="v0.1.1"
+image_tag="v0.6.0"
 container_name="agentdesktop-controller"
 recreate=false
 controller_address=""
@@ -180,7 +180,28 @@ daemonConfig:
   path: /etc/agentdesktop/config/daemon.yaml
 EOF
 
-cat > "${config_dir}/daemon.yaml" <<'EOF'
+# Per-program daemon.yaml fragments, empty when that program isn't managed
+# this run (MANAGED_PROGRAMS/CLAUDE_AUTH_MODE/CODEX_AUTH_MODE come from
+# 15-managed-programs.sh via load_env_file above).
+claude_program_block=""
+if [[ ",${MANAGED_PROGRAMS:-}," == *,claude,* ]]; then
+  if [[ "${CLAUDE_AUTH_MODE:-}" == "subscription" ]]; then
+    claude_program_block=$'  claudeCode:\n    companyAnnouncements: ["Managed by AgentDesktop (demo)"]\n    auth: subscription\n'
+  else
+    claude_program_block=$'  claudeCode:\n    companyAnnouncements: ["Managed by AgentDesktop (demo)"]\n    useLlmGateway: true\n'
+  fi
+fi
+
+codex_program_block=""
+if [[ ",${MANAGED_PROGRAMS:-}," == *,codex,* ]]; then
+  if [[ "${CODEX_AUTH_MODE:-}" == "subscription" ]]; then
+    codex_program_block=$'  codex:\n    auth: subscription\n'
+  else
+    codex_program_block=$'  codex:\n    useLlmGateway: true\n'
+  fi
+fi
+
+cat > "${config_dir}/daemon.yaml" <<EOF
 llmGateway:
   url: http://localhost:4000
   authentication:
@@ -194,9 +215,7 @@ telemetry:
   - tool.use
 
 programs:
-  claudeCode:
-    companyAnnouncements: ["Managed by AgentDesktop (demo)"]
-  claudeDesktop:
+${claude_program_block}${codex_program_block}  claudeDesktop:
     isLocalDevMcpEnabled: true
 EOF
 log_success "Wrote ${config_dir}/controller.yaml and daemon.yaml"
@@ -217,20 +236,32 @@ EOF
 fi
 log_success "Host networking works"
 
+# Copy of the daemon.yaml the current container was created with, so a changed
+# program/auth-mode selection isn't silently left unserved.
+applied_daemon_config="${config_dir}/daemon.yaml.last-applied"
+stale_config_warning="${config_dir}/daemon.yaml changed since ${container_name} was created (or there's no record of what it was created with), so devices may keep getting the old managed-program config. Re-run with --recreate to apply it."
+
 existing_container="$(docker ps -a --filter "name=^${container_name}\$" --format '{{.Names}}' || true)"
 if [[ -n "${existing_container}" ]]; then
   if [[ "${recreate}" == "true" ]]; then
     log_step "Removing existing container (--recreate)"
     docker rm -f "${container_name}" >/dev/null
   else
+    config_stale=false
+    cmp -s "${config_dir}/daemon.yaml" "${applied_daemon_config}" || config_stale=true
     running="$(docker ps --filter "name=^${container_name}\$" --format '{{.Names}}' || true)"
     if [[ -n "${running}" ]]; then
-      log_success "Container ${container_name} already running; leaving it as-is (use --recreate to force)"
+      if [[ "${config_stale}" == "true" ]]; then
+        log_warn "Container ${container_name} already running, NOT recreated. ${stale_config_warning}"
+      else
+        log_success "Container ${container_name} already running with this config; leaving it as-is (use --recreate to force)"
+      fi
       exit 0
     else
       log_step "Starting existing stopped container"
       docker start "${container_name}" >/dev/null
       log_success "Started ${container_name}"
+      if [[ "${config_stale}" == "true" ]]; then log_warn "${stale_config_warning}"; fi
       exit 0
     fi
   fi
@@ -250,6 +281,7 @@ docker run -d \
   --user 65532:65532 \
   "${image_repo}:${image_tag}" \
   --config /etc/agentdesktop/config/controller.yaml >/dev/null
+cp "${config_dir}/daemon.yaml" "${applied_daemon_config}"
 
 log_step "Waiting for the controller to become reachable"
 ready=false
@@ -271,7 +303,7 @@ fi
 fleet_host="${controller_address:-127.0.0.1}"
 log_success "Controller is up: fleet API on https://${fleet_host}:8443, admin UI on http://127.0.0.1:8080 (loopback-only, always local)"
 if [[ -n "${controller_address}" ]]; then
-  log_warn "Remote daemon/agentgateway will need a copy of ${keys_dir}/device-ca.pem (public cert, not secret) - see scripts/22-export-controller-ca.sh"
+  log_warn "Remote daemon/agentgateway will need a copy of ${keys_dir}/device-ca.pem (public cert, not secret) and this machine's managed-programs selection - see scripts/22-export-controller-ca.sh"
 fi
 env_file_set CONTROLLER_ADMIN_URL "http://127.0.0.1:8080"
 env_file_set CONTROLLER_FLEET_ADDRESS "https://${fleet_host}:8443"

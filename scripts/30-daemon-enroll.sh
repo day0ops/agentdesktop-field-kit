@@ -2,7 +2,7 @@
 # Downloads and verifies the released agentdesktop macOS binary, installs it,
 # and writes the daemon's local bootstrap config pointing at the demo
 # controller. Enrollment itself is an interactive OIDC browser flow that
-# needs sudo and a real terminal/browser, so this script prepares everything
+# needs a real terminal/browser, so this script prepares everything
 # and prints the exact command for you to run yourself rather than trying to
 # drive it non-interactively.
 set -euo pipefail
@@ -131,10 +131,10 @@ env_file_set AGENTDESKTOP_VERSION "${resolved_version}"
 cat <<EOF
 
 Everything is staged. Enrollment itself is interactive (opens your browser
-for Entra ID sign-in) and needs sudo, so run this yourself in a terminal you
+for Entra ID sign-in), so run this yourself in a terminal you
 can watch:
 
-    sudo "${install_path}" daemon --config "${bootstrap_path}"
+    "${install_path}" daemon --user --config "${bootstrap_path}"
 
 Sign in as your pilot user (check state/demo.env for PILOT_UPN). Leave that
 terminal running - it's the live daemon process, not a one-shot command.

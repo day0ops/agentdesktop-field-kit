@@ -16,6 +16,10 @@ check_pass() { log_success "$*"; pass=$((pass + 1)); }
 check_fail() { log_error "$*"; fail=$((fail + 1)); }
 check_skip() { log_warn "SKIP: $*"; skip=$((skip + 1)); }
 
+# Base64url (no padding), used by the rate-limit check below to self-sign a
+# throwaway test JWT.
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
 check_start "Entra ID configuration (state/demo.env)"
 if [[ -n "${OIDC_ISSUER:-}" && -n "${OIDC_CLIENT_ID:-}" ]]; then
   check_pass "App registration configured: ${OIDC_CLIENT_ID} @ ${OIDC_ISSUER}"
@@ -97,16 +101,76 @@ else
 fi
 
 check_start "agentgateway reachability (127.0.0.1:4000)"
+agentgateway_reachable=false
 if curl --silent --fail --head --max-time 3 http://127.0.0.1:4000/ >/dev/null 2>&1; then
   check_pass "agentgateway is reachable"
+  agentgateway_reachable=true
 else
   check_skip "agentgateway not reachable (expected if you skipped 21-agentgateway-up.sh)"
 fi
 
+check_start "Per-user rate limiting (agentgateway localRateLimit)"
+gateway_jwt_key="${STATE_DIR}/keys/gateway-jwt-key.pem"
+# kid comes from the JWKS checked above, not a hardcoded value: it's the
+# controller's own internal default, not something this repo configures, and
+# a future controller upgrade could change it.
+ratelimit_kid="$(jq -r '.keys[0].kid // empty' <<<"${jwks:-}" 2>/dev/null)"
+if [[ "${agentgateway_reachable}" != "true" ]]; then
+  check_skip "agentgateway not reachable (see above)"
+elif [[ ! -f "${gateway_jwt_key}" ]]; then
+  check_skip "No local gateway-jwt-key.pem at ${gateway_jwt_key} - can't self-sign a test token here (expected on the gateway machine of a two-machine setup: the signing key stays on the controller machine; this machine's agentgateway still enforces the limit, this check just can't exercise it)"
+elif [[ -z "${ratelimit_kid}" ]]; then
+  check_skip "No JWKS key id available (see Gateway JWKS endpoint check above) - can't build a test token agentgateway will accept"
+else
+  # The reachability route above answers HEAD / directly and never reaches
+  # llm.policies (where localRateLimit lives), so it can't exercise the rate
+  # limit, and a real device JWT needs an interactive enrollment this script
+  # can't drive. Instead, self-sign a short-lived throwaway JWT with the same
+  # key the controller signs with (agentgateway already trusts it via the
+  # JWKS the controller serves) and fire real requests with it - issuer and
+  # audience must match 21-agentgateway-up.sh's jwtAuth block.
+  ratelimit_now="$(date +%s)"
+  ratelimit_header="$(printf '{"alg":"RS256","typ":"JWT","kid":"%s"}' "${ratelimit_kid}")"
+  ratelimit_payload="$(printf '{"iss":"agentdesktop-controller","aud":"agentgateway","sub":"validate-ratelimit-%d-%d","iat":%d,"exp":%d}' \
+    "$$" "${ratelimit_now}" "${ratelimit_now}" "$((ratelimit_now + 300))")"
+  ratelimit_signing_input="$(printf '%s' "${ratelimit_header}" | b64url).$(printf '%s' "${ratelimit_payload}" | b64url)"
+  ratelimit_signature="$(printf '%s' "${ratelimit_signing_input}" | openssl dgst -sha256 -sign "${gateway_jwt_key}" 2>/dev/null | b64url)"
+
+  if [[ -z "${ratelimit_signature}" ]]; then
+    check_fail "Could not sign a test JWT with ${gateway_jwt_key} (openssl dgst failed)"
+  else
+    ratelimit_jwt="${ratelimit_signing_input}.${ratelimit_signature}"
+
+    # 25 requests against the configured 20-requests-per-60s budget (see
+    # 21-agentgateway-up.sh's localRateLimit): enough to trip it with margin.
+    # The request body is deliberately empty - we only need agentgateway to
+    # accept and count the request, not to actually reach a model. The bearer
+    # is fed to curl via its stdin config, not argv, so it never shows up in
+    # `ps` output.
+    ratelimit_codes=""
+    for _ in $(seq 1 25); do
+      ratelimit_code="$(printf 'header = "authorization: Bearer %s"\n' "${ratelimit_jwt}" | \
+        curl --silent --output /dev/null --write-out '%{http_code}' --max-time 3 \
+          --request POST http://127.0.0.1:4000/v1/messages \
+          --header 'content-type: application/json' --data '{}' \
+          --config -)"
+      ratelimit_codes="${ratelimit_codes}${ratelimit_code} "
+    done
+
+    if [[ "${ratelimit_codes}" == *"429"* ]]; then
+      check_pass "Rate limit enforced (429 seen among: ${ratelimit_codes})"
+    else
+      check_fail "No 429 after 25 rapid requests (observed: ${ratelimit_codes})"
+    fi
+  fi
+fi
+
 check_start "Local daemon"
+status_ok=false
 if command -v agentdesktop >/dev/null 2>&1; then
   if status_output="$(agentdesktop status 2>&1)"; then
     check_pass "agentdesktop status: ${status_output}"
+    status_ok=true
   else
     check_fail "agentdesktop is installed but 'status' failed: ${status_output}"
   fi
@@ -118,6 +182,24 @@ if launchctl print system/dev.agentdesktop.daemon >/dev/null 2>&1; then
   check_pass "LaunchDaemon dev.agentdesktop.daemon is loaded"
 else
   check_skip "LaunchDaemon dev.agentdesktop.daemon not loaded (expected before Intune sync completes)"
+fi
+
+check_start "Managed programs (agentdesktop status)"
+if [[ -z "${MANAGED_PROGRAMS:-}" ]]; then
+  check_skip "No managed programs recorded (15-managed-programs.sh not run)"
+elif ! command -v agentdesktop >/dev/null 2>&1; then
+  check_skip "agentdesktop binary not on PATH (run 30-daemon-enroll.sh, or it's Intune-managed only)"
+elif [[ "${status_ok}" != "true" ]]; then
+  check_skip "agentdesktop status failed (see above)"
+else
+  IFS=',' read -r -a managed_programs <<<"${MANAGED_PROGRAMS}"
+  for program in "${managed_programs[@]}"; do
+    if [[ "${status_output:-}" == *"${program}"* ]]; then
+      check_pass "${program} reported as managed in agentdesktop status"
+    else
+      check_fail "${program} not reported as managed in agentdesktop status"
+    fi
+  done
 fi
 
 echo

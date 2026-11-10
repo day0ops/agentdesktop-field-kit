@@ -188,23 +188,156 @@ skip_until intune-licensing || manual_step intune-licensing "Intune licensing (m
 "1. Go to https://admin.microsoft.com -> Billing -> Purchase services -> 'Microsoft Intune Plan 1' -> start the Managed (user-based) trial - only if not already licensed.
 2. Visit https://intune.microsoft.com once and confirm Tenant administration -> Tenant status shows MDM Authority: Microsoft Intune and a non-zero license count."
 
+if [[ "${role}" == "gateway" ]]; then
+  # The controller machine makes this decision once (its daemon.yaml must agree
+  # with this machine's agentgateway.yaml); 22-export-controller-ca.sh there
+  # prints the command that persists the same selection here.
+  skip_until managed-programs || {
+    section managed-programs "Managed programs (from the controller machine)"
+    load_env_file
+    until [[ -n "${MANAGED_PROGRAMS:-}" ]]; do
+      gum style --border normal --padding "1 2" --foreground 250 \
+"Managed programs are chosen on the controller machine. On that machine run:
+
+    scripts/22-export-controller-ca.sh
+
+and paste its \"managed programs\" command into a terminal here, from this
+field-kit checkout. It writes MANAGED_PROGRAMS/*_AUTH_MODE to state/demo.env."
+      choice="$(gum choose "Re-check state/demo.env" "Continue without managed programs (enrollment-only demo)")"
+      [[ "${choice}" == "Re-check state/demo.env" ]] || break
+      load_env_file
+    done
+    if [[ -n "${MANAGED_PROGRAMS:-}" ]]; then
+      carried_summary=""
+      [[ ",${MANAGED_PROGRAMS}," == *,claude,* ]] && carried_summary="claude=${CLAUDE_AUTH_MODE:-unset}"
+      [[ ",${MANAGED_PROGRAMS}," == *,codex,* ]] && carried_summary="${carried_summary:+${carried_summary} }codex=${CODEX_AUTH_MODE:-unset}"
+      gum style --foreground 42 "Using the controller machine's selection from state/demo.env: ${carried_summary}"
+      gum style --foreground 245 "If it changes there, re-run 22-export-controller-ca.sh on the controller machine and paste its command here again."
+      mark_done managed-programs
+    fi
+  }
+fi
+
+[[ "${role}" == "gateway" ]] || skip_until managed-programs || {
+  section managed-programs "Managed programs"
+  load_env_file
+  gum style --foreground 245 "Choose which AI coding tools this demo manages through the controller, agentgateway, and daemon."
+
+  # Claude Code/Codex run on the gateway machine, so under --role controller
+  # this machine's preflight presence checks say nothing about them.
+  claude_offered="${CLAUDE_CODE_PRESENT:-true}"
+  codex_offered="${CODEX_PRESENT:-true}"
+  if [[ "${role}" == "controller" ]]; then
+    claude_offered=true
+    codex_offered=true
+  fi
+
+  program_choices=()
+  default_selected=()
+  if [[ "${claude_offered}" == "true" ]]; then
+    program_choices+=("Claude Code")
+    if [[ -z "${MANAGED_PROGRAMS:-}" || ",${MANAGED_PROGRAMS}," == *,claude,* ]]; then
+      default_selected+=("Claude Code")
+    fi
+  fi
+  if [[ "${codex_offered}" == "true" ]]; then
+    program_choices+=("Codex")
+    if [[ -z "${MANAGED_PROGRAMS:-}" || ",${MANAGED_PROGRAMS}," == *,codex,* ]]; then
+      default_selected+=("Codex")
+    fi
+  fi
+  if (( ${#program_choices[@]} == 0 )); then
+    program_choices=("Claude Code" "Codex")
+    default_selected=("Claude Code" "Codex")
+  fi
+
+  selected=""
+  until [[ -n "${selected}" ]]; do
+    selected="$(gum choose --no-limit --selected "$(IFS=,; echo "${default_selected[*]}")" \
+      --header "Manage which program(s) in this demo?" "${program_choices[@]}")"
+    [[ -n "${selected}" ]] || gum style --foreground 214 "Pick at least one program."
+  done
+
+  programs=""
+  [[ "${selected}" == *"Claude Code"* ]] && programs="claude"
+  [[ "${selected}" == *"Codex"* ]] && programs="${programs:+${programs},}codex"
+
+  managed_programs_args=(--programs "${programs}")
+
+  # Each confirm defaults to api-key when that program's key is already
+  # exported, matching 15-managed-programs.sh's own default. Keys are only
+  # prompted for on the machine that runs agentgateway: under --role
+  # controller, the gateway machine's agentgateway-up step asks instead.
+  claude_default_subscription=true
+  [[ -n "${ANTHROPIC_API_KEY:-}" ]] && claude_default_subscription=false
+  codex_default_subscription=true
+  [[ -n "${OPENAI_API_KEY:-}" ]] && codex_default_subscription=false
+
+  if [[ ",${programs}," == *,claude,* ]]; then
+    if gum confirm "Use a real Claude Team/Enterprise seat instead of an API key?" --default="${claude_default_subscription}"; then
+      managed_programs_args+=(--claude-auth-mode subscription)
+    else
+      managed_programs_args+=(--claude-auth-mode api-key)
+      if [[ -z "${ANTHROPIC_API_KEY:-}" && "${role}" != "controller" ]]; then
+        ANTHROPIC_API_KEY="$(gum input --password --placeholder "sk-ant-...")"
+        export ANTHROPIC_API_KEY
+      fi
+    fi
+  fi
+
+  if [[ ",${programs}," == *,codex,* ]]; then
+    if gum confirm "Use a real ChatGPT account instead of an API key?" --default="${codex_default_subscription}"; then
+      managed_programs_args+=(--codex-auth-mode subscription)
+    else
+      managed_programs_args+=(--codex-auth-mode api-key)
+      if [[ -z "${OPENAI_API_KEY:-}" && "${role}" != "controller" ]]; then
+        OPENAI_API_KEY="$(gum input --password --placeholder "sk-...")"
+        export OPENAI_API_KEY
+      fi
+    fi
+  fi
+
+  run_auto managed-programs "Managed programs" \
+    "Resolves which of Claude Code / Codex this demo manages and each one's auth mode (subscription seat vs. API key), persists the decision to state/demo.env." \
+    -- "${SCRIPTS_DIR}/15-managed-programs.sh" "${managed_programs_args[@]}"
+}
+
 skip_until controller-up || role_skip controller || run_auto controller-up "Controller (Docker, local, Entra-backed)" \
   "Generates dev TLS/CA/JWT keys, renders controller.yaml with real Entra ID as OIDC issuer, runs the controller via docker run (no Kubernetes/Postgres)." \
   -- "${SCRIPTS_DIR}/20-controller-up.sh"
 
 skip_until agentgateway-up || role_skip gateway || {
-  section agentgateway-up "agentgateway (live Claude Code traffic)"
-  if gum confirm "Include live Claude Code traffic through agentgateway?" --default=true; then
-    if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+  section agentgateway-up "agentgateway (managed program traffic)"
+  load_env_file
+  if [[ -z "${MANAGED_PROGRAMS:-}" ]]; then
+    # agentgateway only fronts managed programs (21-agentgateway-up.sh refuses
+    # to start without one), so an enrollment-only demo has nothing to run here.
+    gum style --foreground 214 "No managed programs selected - skipping agentgateway (enrollment-only demo). Run --from managed-programs to add one."
+  else
+    # Every selected program's daemon config points at this gateway, so it
+    # isn't optional here. Auth mode/keys are normally already resolved and
+    # exported by the managed-programs step above. This only prompts when
+    # that's not true - e.g. jumping straight here with --from, or under
+    # --role gateway, where the selection came from the controller machine
+    # and no key was asked for there. Gate each *_AUTH_MODE read on
+    # MANAGED_PROGRAMS membership first: 15-managed-programs.sh never clears a
+    # stale *_AUTH_MODE left over from an earlier run where that program was
+    # selected but no longer is.
+    if [[ ",${MANAGED_PROGRAMS}," == *,claude,* && "${CLAUDE_AUTH_MODE:-}" == "api-key" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
+      gum style --foreground 245 "Claude Code is in api-key mode: enter ANTHROPIC_API_KEY (kept in memory only)."
       ANTHROPIC_API_KEY="$(gum input --password --placeholder "sk-ant-...")"
       export ANTHROPIC_API_KEY
     fi
+    if [[ ",${MANAGED_PROGRAMS}," == *,codex,* && "${CODEX_AUTH_MODE:-}" == "api-key" && -z "${OPENAI_API_KEY:-}" ]]; then
+      gum style --foreground 245 "Codex is in api-key mode: enter OPENAI_API_KEY (kept in memory only)."
+      OPENAI_API_KEY="$(gum input --password --placeholder "sk-...")"
+      export OPENAI_API_KEY
+    fi
     run_auto agentgateway-up "agentgateway" \
-      "Starts agentgateway, validating controller-issued JWTs and forwarding to Anthropic." \
+      "Starts agentgateway, validating controller-issued JWTs and forwarding to the configured provider(s). Required: every managed program (${MANAGED_PROGRAMS}) is configured to send its traffic here." \
       -- "${SCRIPTS_DIR}/21-agentgateway-up.sh"
-  else
-    gum style --foreground 214 "Skipping agentgateway - enrollment/management story only."
-    mark_done agentgateway-up
+    is_done agentgateway-up || gum style --foreground 196 --bold \
+      "agentgateway is not running yet, so ${MANAGED_PROGRAMS} will not work. Re-run with: ./run-demo.sh --from agentgateway-up"
   fi
 }
 
@@ -213,22 +346,48 @@ skip_until daemon-prepare || role_skip gateway || run_auto daemon-prepare "Prepa
   -- "${SCRIPTS_DIR}/30-daemon-enroll.sh"
 
 load_env_file
-skip_until daemon-enroll || role_skip gateway || manual_step daemon-enroll "Enroll this Mac directly (manual, interactive)" \
-"Enrollment needs sudo and opens your browser for Entra ID sign-in, so run it yourself in a
+# Which program(s), if any, need an interactive browser sign-in once the
+# daemon is up - only subscription mode does (api-key mode has no session).
+# Gated on MANAGED_PROGRAMS membership first: a stale *_AUTH_MODE can be
+# left over from an earlier run where that program was selected but no
+# longer is (15-managed-programs.sh never clears it).
+subscription_signin=""
+if [[ ",${MANAGED_PROGRAMS:-}," == *,claude,* && "${CLAUDE_AUTH_MODE:-}" == "subscription" ]]; then
+  subscription_signin="Claude.ai"
+fi
+if [[ ",${MANAGED_PROGRAMS:-}," == *,codex,* && "${CODEX_AUTH_MODE:-}" == "subscription" ]]; then
+  subscription_signin="${subscription_signin:+${subscription_signin} and }ChatGPT"
+fi
+daemon_enroll_instructions="Enrollment opens your browser for Entra ID sign-in, so run it yourself in a
 terminal you can watch (leave it running - it's the live daemon, not one-shot):
 
-    sudo ${AGENTDESKTOP_BIN:-/usr/local/bin/agentdesktop} daemon --config ${DAEMON_BOOTSTRAP_PATH:-${STATE_DIR}/config/daemon-bootstrap.yaml}
+    ${AGENTDESKTOP_BIN:-/usr/local/bin/agentdesktop} daemon --user --config ${DAEMON_BOOTSTRAP_PATH:-${STATE_DIR}/config/daemon-bootstrap.yaml}
 
 Sign in as your pilot user (${PILOT_UPN:-check state/demo.env}). This is the quick manual
 sanity-check path - 41-intune-push.sh below is the path that actually demonstrates
 Intune management."
+if [[ -n "${subscription_signin}" ]]; then
+  daemon_enroll_instructions+="
+
+Once the daemon is running and enrolled, sign into ${subscription_signin} in a browser
+when agentdesktop's checklist/UI prompts for it - subscription auth needs that live
+sign-in, same as the Entra ID sign-in above."
+fi
+skip_until daemon-enroll || role_skip gateway || manual_step daemon-enroll "Enroll this Mac directly (manual, interactive)" \
+"${daemon_enroll_instructions}"
 
 skip_until intune-groups || role_skip gateway || run_auto intune-groups "Intune pilot group" \
   "Creates the AgentDesktop-Pilot-macOS security group and adds the pilot user." \
   -- "${SCRIPTS_DIR}/40-intune-groups.sh"
 
+intune_push_description="Renders a shell script that installs the daemon as a LaunchDaemon and writes its bootstrap config, pushes it to Intune, assigns the pilot group."
+if [[ -n "${subscription_signin}" ]]; then
+  intune_push_description+="
+
+WARNING: that LaunchDaemon runs the daemon in system mode, which doesn't support subscription auth, so the ${subscription_signin} subscription won't work on Intune-managed Macs yet - an upcoming change fixes this. Use the daemon-enroll step above to demo subscription mode."
+fi
 skip_until intune-push || role_skip gateway || run_auto intune-push "Push Intune bootstrap script" \
-  "Renders a shell script that installs the daemon as a LaunchDaemon and writes its bootstrap config, pushes it to Intune, assigns the pilot group." \
+  "${intune_push_description}" \
   -- "${SCRIPTS_DIR}/41-intune-push.sh"
 
 skip_until intune-enroll || role_skip gateway || manual_step intune-enroll "Enroll the Mac in Intune (manual, interactive)" \

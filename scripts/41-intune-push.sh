@@ -44,6 +44,22 @@ group_id="${group_id:-${INTUNE_PILOT_GROUP_ID:-}}"
 [[ -n "${group_id}" ]] || die "No group id given and none found in state. Run 40-intune-groups.sh first, or pass --group-id."
 controller_address="${controller_address:-https://${CONTROLLER_PUBLIC_ADDRESS:-127.0.0.1}:8443}"
 
+# The LaunchDaemon below runs the daemon in system mode, but subscription auth
+# needs a user-mode daemon. Moving Intune delivery to a user-mode LaunchAgent
+# is a separate, upcoming change; until then, say so instead of silently
+# pushing a config those programs can't work under.
+subscription_programs=""
+if [[ ",${MANAGED_PROGRAMS:-}," == *,claude,* && "${CLAUDE_AUTH_MODE:-}" == "subscription" ]]; then
+  subscription_programs="claude"
+fi
+if [[ ",${MANAGED_PROGRAMS:-}," == *,codex,* && "${CODEX_AUTH_MODE:-}" == "subscription" ]]; then
+  subscription_programs="${subscription_programs:+${subscription_programs},}codex"
+fi
+if [[ -n "${subscription_programs}" ]]; then
+  log_warn "Subscription auth is selected for: ${subscription_programs}. Intune delivery currently installs the daemon as a system-mode LaunchDaemon, which doesn't support subscription auth, so ${subscription_programs} won't work on Intune-managed Macs yet (an upcoming change moves this to a user-mode LaunchAgent)."
+  log_warn "To demo subscription mode, use the local path instead (30-daemon-enroll.sh, which runs 'agentdesktop daemon --user'). To demo through Intune now, switch to api-key mode with 15-managed-programs.sh (--claude-auth-mode/--codex-auth-mode api-key) and re-run 20-controller-up.sh/21-agentgateway-up.sh with --recreate."
+fi
+
 device_ca="${STATE_DIR}/keys/device-ca.pem"
 [[ -f "${device_ca}" ]] || die "Device CA not found at ${device_ca}. Run 20-controller-up.sh first."
 
