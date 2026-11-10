@@ -197,11 +197,15 @@ skip_until managed-programs || {
   default_selected=()
   if [[ "${CLAUDE_CODE_PRESENT:-true}" == "true" ]]; then
     program_choices+=("Claude Code")
-    default_selected+=("Claude Code")
+    if [[ -z "${MANAGED_PROGRAMS:-}" || ",${MANAGED_PROGRAMS}," == *,claude,* ]]; then
+      default_selected+=("Claude Code")
+    fi
   fi
   if [[ "${CODEX_PRESENT:-true}" == "true" ]]; then
     program_choices+=("Codex")
-    default_selected+=("Codex")
+    if [[ -z "${MANAGED_PROGRAMS:-}" || ",${MANAGED_PROGRAMS}," == *,codex,* ]]; then
+      default_selected+=("Codex")
+    fi
   fi
   if (( ${#program_choices[@]} == 0 )); then
     program_choices=("Claude Code" "Codex")
@@ -260,22 +264,30 @@ skip_until agentgateway-up || role_skip gateway || {
   # Auth mode/keys are normally already resolved and exported by the
   # managed-programs step above. This only re-prompts when that's not true -
   # e.g. jumping straight here with --from, where the key was never exported
-  # in this process.
-  needs_key=false
-  [[ "${CLAUDE_AUTH_MODE:-}" == "api-key" && -z "${ANTHROPIC_API_KEY:-}" ]] && needs_key=true
-  [[ "${CODEX_AUTH_MODE:-}" == "api-key" && -z "${OPENAI_API_KEY:-}" ]] && needs_key=true
+  # in this process. Gate each *_AUTH_MODE read on MANAGED_PROGRAMS
+  # membership first: 15-managed-programs.sh never clears a stale
+  # *_AUTH_MODE left over from an earlier run where that program was
+  # selected but no longer is.
+  claude_needs_key=false
+  codex_needs_key=false
+  if [[ ",${MANAGED_PROGRAMS:-}," == *,claude,* && "${CLAUDE_AUTH_MODE:-}" == "api-key" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
+    claude_needs_key=true
+  fi
+  if [[ ",${MANAGED_PROGRAMS:-}," == *,codex,* && "${CODEX_AUTH_MODE:-}" == "api-key" && -z "${OPENAI_API_KEY:-}" ]]; then
+    codex_needs_key=true
+  fi
 
   proceed=true
-  if [[ "${needs_key}" == "true" ]]; then
+  if [[ "${claude_needs_key}" == "true" || "${codex_needs_key}" == "true" ]]; then
     gum confirm "Include live Claude Code traffic through agentgateway?" --default=true || proceed=false
   fi
 
   if [[ "${proceed}" == "true" ]]; then
-    if [[ "${CLAUDE_AUTH_MODE:-}" == "api-key" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
+    if [[ "${claude_needs_key}" == "true" ]]; then
       ANTHROPIC_API_KEY="$(gum input --password --placeholder "sk-ant-...")"
       export ANTHROPIC_API_KEY
     fi
-    if [[ "${CODEX_AUTH_MODE:-}" == "api-key" && -z "${OPENAI_API_KEY:-}" ]]; then
+    if [[ "${codex_needs_key}" == "true" ]]; then
       OPENAI_API_KEY="$(gum input --password --placeholder "sk-...")"
       export OPENAI_API_KEY
     fi
@@ -295,9 +307,14 @@ skip_until daemon-prepare || role_skip gateway || run_auto daemon-prepare "Prepa
 load_env_file
 # Which program(s), if any, need an interactive browser sign-in once the
 # daemon is up - only subscription mode does (api-key mode has no session).
+# Gated on MANAGED_PROGRAMS membership first: a stale *_AUTH_MODE can be
+# left over from an earlier run where that program was selected but no
+# longer is (15-managed-programs.sh never clears it).
 subscription_signin=""
-[[ "${CLAUDE_AUTH_MODE:-}" == "subscription" ]] && subscription_signin="Claude.ai"
-if [[ "${CODEX_AUTH_MODE:-}" == "subscription" ]]; then
+if [[ ",${MANAGED_PROGRAMS:-}," == *,claude,* && "${CLAUDE_AUTH_MODE:-}" == "subscription" ]]; then
+  subscription_signin="Claude.ai"
+fi
+if [[ ",${MANAGED_PROGRAMS:-}," == *,codex,* && "${CODEX_AUTH_MODE:-}" == "subscription" ]]; then
   subscription_signin="${subscription_signin:+${subscription_signin} and }ChatGPT"
 fi
 daemon_enroll_instructions="Enrollment opens your browser for Entra ID sign-in, so run it yourself in a
