@@ -63,7 +63,7 @@ Managed programs and their auth modes are chosen once, on the controller machine
 - **Entra ID**: pilot user, "agentdesktop enrollment" app registration (no secret, PKCE, loopback redirect), admin consent, pilot security group.
 - **A second app registration** ("agentdesktop field-kit automation") purely to work around Azure CLI being unable to hold the Intune Graph permission it needs (`AADSTS65002` - Microsoft blocks first-party apps from ad hoc scope grants). Holds a secret only for the seconds it takes to mint a token; deleted immediately after, every run. See `lib/get-graph-app-token.sh`.
 - **Local controller**: `docker run` of the published image (SQLite, no Kubernetes/Postgres).
-- **Intune**: a shell script (not a signed/notarized PKG - we don't have a notarization identity for a same-day pilot) that installs the daemon as a LaunchDaemon and writes its bootstrap config.
+- **Intune**: a shell script (not a signed/notarized PKG - we don't have a notarization identity for a same-day pilot) that installs the daemon as a LaunchDaemon and writes its bootstrap config. That LaunchDaemon runs in system mode, which doesn't support subscription auth, so subscription-mode programs only work through the local `daemon-enroll` path for now; `41-intune-push.sh` warns when this applies.
 
 In subscription mode (the default), once the daemon has enrolled and applied its configuration, the pilot operator signs into Claude.ai and/or ChatGPT in a browser when agentdesktop's checklist/UI prompts for it - a manual step, same as the Entra ID sign-in during enrollment. This isn't needed in api-key mode.
 

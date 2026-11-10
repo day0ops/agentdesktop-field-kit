@@ -380,8 +380,14 @@ skip_until intune-groups || role_skip gateway || run_auto intune-groups "Intune 
   "Creates the AgentDesktop-Pilot-macOS security group and adds the pilot user." \
   -- "${SCRIPTS_DIR}/40-intune-groups.sh"
 
+intune_push_description="Renders a shell script that installs the daemon as a LaunchDaemon and writes its bootstrap config, pushes it to Intune, assigns the pilot group."
+if [[ -n "${subscription_signin}" ]]; then
+  intune_push_description+="
+
+WARNING: that LaunchDaemon runs the daemon in system mode, which doesn't support subscription auth, so the ${subscription_signin} subscription won't work on Intune-managed Macs yet - an upcoming change fixes this. Use the daemon-enroll step above to demo subscription mode."
+fi
 skip_until intune-push || role_skip gateway || run_auto intune-push "Push Intune bootstrap script" \
-  "Renders a shell script that installs the daemon as a LaunchDaemon and writes its bootstrap config, pushes it to Intune, assigns the pilot group." \
+  "${intune_push_description}" \
   -- "${SCRIPTS_DIR}/41-intune-push.sh"
 
 skip_until intune-enroll || role_skip gateway || manual_step intune-enroll "Enroll the Mac in Intune (manual, interactive)" \
