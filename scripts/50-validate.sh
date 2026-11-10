@@ -118,7 +118,7 @@ ratelimit_kid="$(jq -r '.keys[0].kid // empty' <<<"${jwks:-}" 2>/dev/null)"
 if [[ "${agentgateway_reachable}" != "true" ]]; then
   check_skip "agentgateway not reachable (see above)"
 elif [[ ! -f "${gateway_jwt_key}" ]]; then
-  check_skip "No local gateway-jwt-key.pem at ${gateway_jwt_key} - can't self-sign a test token here (expected if the controller runs on a different machine; the limit is still enforced there)"
+  check_skip "No local gateway-jwt-key.pem at ${gateway_jwt_key} - can't self-sign a test token here (expected on the gateway machine of a two-machine setup: the signing key stays on the controller machine; this machine's agentgateway still enforces the limit, this check just can't exercise it)"
 elif [[ -z "${ratelimit_kid}" ]]; then
   check_skip "No JWKS key id available (see Gateway JWKS endpoint check above) - can't build a test token agentgateway will accept"
 else

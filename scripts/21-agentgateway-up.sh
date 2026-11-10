@@ -54,8 +54,10 @@ keys_dir="${STATE_DIR}/keys"
 
 # Selection and modes are read from persisted state, never re-derived from
 # which API keys happen to be set here: in the two-machine topology they were
-# resolved on the controller machine, and the daemon.yaml it serves must agree
-# with this gateway config. An empty *_mode means that program isn't selected.
+# resolved on the controller machine and carried here by running the
+# 15-managed-programs.sh command 22-export-controller-ca.sh prints there, and
+# the daemon.yaml the controller serves must agree with this gateway config.
+# An empty *_mode means that program isn't selected.
 require_valid_auth_mode() {
   local program=$1 mode_var=$2
   local mode="${!mode_var:-}"

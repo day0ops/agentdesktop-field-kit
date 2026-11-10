@@ -290,7 +290,7 @@ fi
 fleet_host="${controller_address:-127.0.0.1}"
 log_success "Controller is up: fleet API on https://${fleet_host}:8443, admin UI on http://127.0.0.1:8080 (loopback-only, always local)"
 if [[ -n "${controller_address}" ]]; then
-  log_warn "Remote daemon/agentgateway will need a copy of ${keys_dir}/device-ca.pem (public cert, not secret) - see scripts/22-export-controller-ca.sh"
+  log_warn "Remote daemon/agentgateway will need a copy of ${keys_dir}/device-ca.pem (public cert, not secret) and this machine's managed-programs selection - see scripts/22-export-controller-ca.sh"
 fi
 env_file_set CONTROLLER_ADMIN_URL "http://127.0.0.1:8080"
 env_file_set CONTROLLER_FLEET_ADDRESS "https://${fleet_host}:8443"

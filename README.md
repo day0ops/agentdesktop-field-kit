@@ -56,6 +56,8 @@ Each `--role` only shows the steps relevant to that machine; shared cloud/Entra/
 
 After `controller-up` finishes, run `scripts/22-export-controller-ca.sh` on the controller machine and follow its printed instructions to copy the (public, non-secret) device CA cert over to the other machine's `state/keys/device-ca.pem` - required before `agentgateway-up`/`daemon-prepare`/`intune-push` will trust the controller over the network.
 
+Managed programs and their auth modes are chosen once, on the controller machine (both programs are offered there, since Claude Code/Codex run on the other machine). The same `22-export-controller-ca.sh` output ends with a `15-managed-programs.sh` command; run it in the other machine's checkout so its agentgateway config matches the daemon config the controller serves. The `--role gateway` wizard waits for that instead of prompting. Any API keys for api-key mode are entered on the other machine, where agentgateway runs.
+
 ## What gets created
 
 - **Entra ID**: pilot user, "agentdesktop enrollment" app registration (no secret, PKCE, loopback redirect), admin consent, pilot security group.

@@ -188,20 +188,59 @@ skip_until intune-licensing || manual_step intune-licensing "Intune licensing (m
 "1. Go to https://admin.microsoft.com -> Billing -> Purchase services -> 'Microsoft Intune Plan 1' -> start the Managed (user-based) trial - only if not already licensed.
 2. Visit https://intune.microsoft.com once and confirm Tenant administration -> Tenant status shows MDM Authority: Microsoft Intune and a non-zero license count."
 
-skip_until managed-programs || {
+if [[ "${role}" == "gateway" ]]; then
+  # The controller machine makes this decision once (its daemon.yaml must agree
+  # with this machine's agentgateway.yaml); 22-export-controller-ca.sh there
+  # prints the command that persists the same selection here.
+  skip_until managed-programs || {
+    section managed-programs "Managed programs (from the controller machine)"
+    load_env_file
+    until [[ -n "${MANAGED_PROGRAMS:-}" ]]; do
+      gum style --border normal --padding "1 2" --foreground 250 \
+"Managed programs are chosen on the controller machine. On that machine run:
+
+    scripts/22-export-controller-ca.sh
+
+and paste its \"managed programs\" command into a terminal here, from this
+field-kit checkout. It writes MANAGED_PROGRAMS/*_AUTH_MODE to state/demo.env."
+      choice="$(gum choose "Re-check state/demo.env" "Continue without managed programs (enrollment-only demo)")"
+      [[ "${choice}" == "Re-check state/demo.env" ]] || break
+      load_env_file
+    done
+    if [[ -n "${MANAGED_PROGRAMS:-}" ]]; then
+      carried_summary=""
+      [[ ",${MANAGED_PROGRAMS}," == *,claude,* ]] && carried_summary="claude=${CLAUDE_AUTH_MODE:-unset}"
+      [[ ",${MANAGED_PROGRAMS}," == *,codex,* ]] && carried_summary="${carried_summary:+${carried_summary} }codex=${CODEX_AUTH_MODE:-unset}"
+      gum style --foreground 42 "Using the controller machine's selection from state/demo.env: ${carried_summary}"
+      gum style --foreground 245 "If it changes there, re-run 22-export-controller-ca.sh on the controller machine and paste its command here again."
+      mark_done managed-programs
+    fi
+  }
+fi
+
+[[ "${role}" == "gateway" ]] || skip_until managed-programs || {
   section managed-programs "Managed programs"
   load_env_file
   gum style --foreground 245 "Choose which AI coding tools this demo manages through the controller, agentgateway, and daemon."
 
+  # Claude Code/Codex run on the gateway machine, so under --role controller
+  # this machine's preflight presence checks say nothing about them.
+  claude_offered="${CLAUDE_CODE_PRESENT:-true}"
+  codex_offered="${CODEX_PRESENT:-true}"
+  if [[ "${role}" == "controller" ]]; then
+    claude_offered=true
+    codex_offered=true
+  fi
+
   program_choices=()
   default_selected=()
-  if [[ "${CLAUDE_CODE_PRESENT:-true}" == "true" ]]; then
+  if [[ "${claude_offered}" == "true" ]]; then
     program_choices+=("Claude Code")
     if [[ -z "${MANAGED_PROGRAMS:-}" || ",${MANAGED_PROGRAMS}," == *,claude,* ]]; then
       default_selected+=("Claude Code")
     fi
   fi
-  if [[ "${CODEX_PRESENT:-true}" == "true" ]]; then
+  if [[ "${codex_offered}" == "true" ]]; then
     program_choices+=("Codex")
     if [[ -z "${MANAGED_PROGRAMS:-}" || ",${MANAGED_PROGRAMS}," == *,codex,* ]]; then
       default_selected+=("Codex")
@@ -225,12 +264,21 @@ skip_until managed-programs || {
 
   managed_programs_args=(--programs "${programs}")
 
+  # Each confirm defaults to api-key when that program's key is already
+  # exported, matching 15-managed-programs.sh's own default. Keys are only
+  # prompted for on the machine that runs agentgateway: under --role
+  # controller, the gateway machine's agentgateway-up step asks instead.
+  claude_default_subscription=true
+  [[ -n "${ANTHROPIC_API_KEY:-}" ]] && claude_default_subscription=false
+  codex_default_subscription=true
+  [[ -n "${OPENAI_API_KEY:-}" ]] && codex_default_subscription=false
+
   if [[ ",${programs}," == *,claude,* ]]; then
-    if gum confirm "Use a real Claude Team/Enterprise seat instead of an API key?" --default=true; then
+    if gum confirm "Use a real Claude Team/Enterprise seat instead of an API key?" --default="${claude_default_subscription}"; then
       managed_programs_args+=(--claude-auth-mode subscription)
     else
       managed_programs_args+=(--claude-auth-mode api-key)
-      if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+      if [[ -z "${ANTHROPIC_API_KEY:-}" && "${role}" != "controller" ]]; then
         ANTHROPIC_API_KEY="$(gum input --password --placeholder "sk-ant-...")"
         export ANTHROPIC_API_KEY
       fi
@@ -238,11 +286,11 @@ skip_until managed-programs || {
   fi
 
   if [[ ",${programs}," == *,codex,* ]]; then
-    if gum confirm "Use a real ChatGPT account instead of an API key?" --default=true; then
+    if gum confirm "Use a real ChatGPT account instead of an API key?" --default="${codex_default_subscription}"; then
       managed_programs_args+=(--codex-auth-mode subscription)
     else
       managed_programs_args+=(--codex-auth-mode api-key)
-      if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+      if [[ -z "${OPENAI_API_KEY:-}" && "${role}" != "controller" ]]; then
         OPENAI_API_KEY="$(gum input --password --placeholder "sk-...")"
         export OPENAI_API_KEY
       fi
@@ -268,9 +316,10 @@ skip_until agentgateway-up || role_skip gateway || {
   else
     # Every selected program's daemon config points at this gateway, so it
     # isn't optional here. Auth mode/keys are normally already resolved and
-    # exported by the managed-programs step above. This only re-prompts when
-    # that's not true - e.g. jumping straight here with --from, where the key
-    # was never exported in this process. Gate each *_AUTH_MODE read on
+    # exported by the managed-programs step above. This only prompts when
+    # that's not true - e.g. jumping straight here with --from, or under
+    # --role gateway, where the selection came from the controller machine
+    # and no key was asked for there. Gate each *_AUTH_MODE read on
     # MANAGED_PROGRAMS membership first: 15-managed-programs.sh never clears a
     # stale *_AUTH_MODE left over from an earlier run where that program was
     # selected but no longer is.
