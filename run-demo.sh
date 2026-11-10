@@ -259,44 +259,36 @@ skip_until controller-up || role_skip controller || run_auto controller-up "Cont
   -- "${SCRIPTS_DIR}/20-controller-up.sh"
 
 skip_until agentgateway-up || role_skip gateway || {
-  section agentgateway-up "agentgateway (live Claude Code traffic)"
+  section agentgateway-up "agentgateway (managed program traffic)"
   load_env_file
-  # Auth mode/keys are normally already resolved and exported by the
-  # managed-programs step above. This only re-prompts when that's not true -
-  # e.g. jumping straight here with --from, where the key was never exported
-  # in this process. Gate each *_AUTH_MODE read on MANAGED_PROGRAMS
-  # membership first: 15-managed-programs.sh never clears a stale
-  # *_AUTH_MODE left over from an earlier run where that program was
-  # selected but no longer is.
-  claude_needs_key=false
-  codex_needs_key=false
-  if [[ ",${MANAGED_PROGRAMS:-}," == *,claude,* && "${CLAUDE_AUTH_MODE:-}" == "api-key" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
-    claude_needs_key=true
-  fi
-  if [[ ",${MANAGED_PROGRAMS:-}," == *,codex,* && "${CODEX_AUTH_MODE:-}" == "api-key" && -z "${OPENAI_API_KEY:-}" ]]; then
-    codex_needs_key=true
-  fi
-
-  proceed=true
-  if [[ "${claude_needs_key}" == "true" || "${codex_needs_key}" == "true" ]]; then
-    gum confirm "Include live Claude Code traffic through agentgateway?" --default=true || proceed=false
-  fi
-
-  if [[ "${proceed}" == "true" ]]; then
-    if [[ "${claude_needs_key}" == "true" ]]; then
+  if [[ -z "${MANAGED_PROGRAMS:-}" ]]; then
+    # agentgateway only fronts managed programs (21-agentgateway-up.sh refuses
+    # to start without one), so an enrollment-only demo has nothing to run here.
+    gum style --foreground 214 "No managed programs selected - skipping agentgateway (enrollment-only demo). Run --from managed-programs to add one."
+  else
+    # Every selected program's daemon config points at this gateway, so it
+    # isn't optional here. Auth mode/keys are normally already resolved and
+    # exported by the managed-programs step above. This only re-prompts when
+    # that's not true - e.g. jumping straight here with --from, where the key
+    # was never exported in this process. Gate each *_AUTH_MODE read on
+    # MANAGED_PROGRAMS membership first: 15-managed-programs.sh never clears a
+    # stale *_AUTH_MODE left over from an earlier run where that program was
+    # selected but no longer is.
+    if [[ ",${MANAGED_PROGRAMS}," == *,claude,* && "${CLAUDE_AUTH_MODE:-}" == "api-key" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
+      gum style --foreground 245 "Claude Code is in api-key mode: enter ANTHROPIC_API_KEY (kept in memory only)."
       ANTHROPIC_API_KEY="$(gum input --password --placeholder "sk-ant-...")"
       export ANTHROPIC_API_KEY
     fi
-    if [[ "${codex_needs_key}" == "true" ]]; then
+    if [[ ",${MANAGED_PROGRAMS}," == *,codex,* && "${CODEX_AUTH_MODE:-}" == "api-key" && -z "${OPENAI_API_KEY:-}" ]]; then
+      gum style --foreground 245 "Codex is in api-key mode: enter OPENAI_API_KEY (kept in memory only)."
       OPENAI_API_KEY="$(gum input --password --placeholder "sk-...")"
       export OPENAI_API_KEY
     fi
     run_auto agentgateway-up "agentgateway" \
-      "Starts agentgateway, validating controller-issued JWTs and forwarding to the configured provider(s)." \
+      "Starts agentgateway, validating controller-issued JWTs and forwarding to the configured provider(s). Required: every managed program (${MANAGED_PROGRAMS}) is configured to send its traffic here." \
       -- "${SCRIPTS_DIR}/21-agentgateway-up.sh"
-  else
-    gum style --foreground 214 "Skipping agentgateway - enrollment/management story only."
-    mark_done agentgateway-up
+    is_done agentgateway-up || gum style --foreground 196 --bold \
+      "agentgateway is not running yet, so ${MANAGED_PROGRAMS} will not work. Re-run with: ./run-demo.sh --from agentgateway-up"
   fi
 }
 
