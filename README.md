@@ -22,7 +22,9 @@ Controller and agentgateway/daemon split across two machines (see "Two-machine s
 - [Homebrew](https://brew.sh), then: `brew install azure-cli jq gum`
 - `openssl` 3.x
 - Microsoft Entra ID + Intune tenant
-- `ANTHROPIC_API_KEY` - Note: the wizard prompts for it and it's never written to disk
+- [Claude Code](https://docs.claude.com/en/docs/claude-code) and/or [Codex](https://github.com/openai/codex) CLI installed on the pilot Mac, for whichever managed program(s) you select (Codex >= 0.153.4 - agentdesktop's subscription flow is validated against that version; older is a preflight warning, not a hard failure)
+- A Claude Team/Enterprise seat and/or a ChatGPT account, for subscription mode - the default for each selected program; you sign in via browser later in the wizard
+- `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` - optional, only needed if you opt into api-key mode for Claude Code/Codex instead of the default subscription mode. Read only from the environment, never written to disk
 
 ## Quick start
 
@@ -34,10 +36,12 @@ Controller and agentgateway/daemon split across two machines (see "Two-machine s
 
 Guided, resumable wizard. It remembers which steps are already done (in `state/wizard-progress`) and asks before re-running a completed step or doing anything destructive.
 
-- `./run-demo.sh --from STEP_ID` - jump straight to a step, treating everything before it as already done. Useful for resuming after a break instead of clicking through steps you've already finished. Step ids are the short names the wizard prints as section headers, e.g. `preflight`, `pilot-user`, `entra-app`, `entra-consent`, `intune-licensing`, `controller-up`, `agentgateway-up`, `daemon-prepare`, `daemon-enroll`, `intune-groups`, `intune-push`, `intune-enroll`, `validate`.
+- `./run-demo.sh --from STEP_ID` - jump straight to a step, treating everything before it as already done. Useful for resuming after a break instead of clicking through steps you've already finished. Step ids are the short names the wizard prints as section headers, e.g. `preflight`, `pilot-user`, `entra-app`, `entra-consent`, `intune-licensing`, `managed-programs`, `controller-up`, `agentgateway-up`, `daemon-prepare`, `daemon-enroll`, `intune-groups`, `intune-push`, `intune-enroll`, `validate`.
 - `./run-demo.sh --reset` - clear all recorded progress and start over from the first step.
 
 Or run any `scripts/NN-*.sh` standalone - all support `--dry-run` and `--help`.
+
+The `managed-programs` step (`scripts/15-managed-programs.sh`) resolves which of Claude Code / Codex this demo manages and each one's auth mode, and can be driven non-interactively: `--programs claude,codex` (comma-separated subset; default: both, minus whichever preflight found not installed), `--claude-auth-mode` / `--codex-auth-mode` (`subscription` or `api-key`; default per program: `api-key` if that program's API key is already set in the environment, else `subscription`).
 
 ## Two-machine setup
 
@@ -56,6 +60,8 @@ After `controller-up` finishes, run `scripts/22-export-controller-ca.sh` on the 
 - **A second app registration** ("agentdesktop field-kit automation") purely to work around Azure CLI being unable to hold the Intune Graph permission it needs (`AADSTS65002` - Microsoft blocks first-party apps from ad hoc scope grants). Holds a secret only for the seconds it takes to mint a token; deleted immediately after, every run. See `lib/get-graph-app-token.sh`.
 - **Local controller**: `docker run` of the published image (SQLite, no Kubernetes/Postgres).
 - **Intune**: a shell script (not a signed/notarized PKG - we don't have a notarization identity for a same-day pilot) that installs the daemon as a LaunchDaemon and writes its bootstrap config.
+
+In subscription mode (the default), once the daemon has enrolled and applied its configuration, the pilot operator signs into Claude.ai and/or ChatGPT in a browser when agentdesktop's checklist/UI prompts for it - a manual step, same as the Entra ID sign-in during enrollment. This isn't needed in api-key mode.
 
 ## Teardown
 
