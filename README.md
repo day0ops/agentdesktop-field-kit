@@ -43,6 +43,8 @@ Or run any `scripts/NN-*.sh` standalone - all support `--dry-run` and `--help`.
 
 The `managed-programs` step (`scripts/15-managed-programs.sh`) resolves which of Claude Code / Codex this demo manages and each one's auth mode, and can be driven non-interactively: `--programs claude,codex` (comma-separated subset; default: both, minus whichever preflight found not installed), `--claude-auth-mode` / `--codex-auth-mode` (`subscription` or `api-key`; default per program: `api-key` if that program's API key is already set in the environment, else `subscription`).
 
+agentgateway enforces two per-user limits, keyed on the signed-in user's identity: 20 requests per minute (low on purpose, so you can trip it live) and 300,000 tokens per hour. Both live in memory, so restarting the container resets them: `docker restart agentdesktop-agentgateway`.
+
 ## Two-machine setup
 
 Controller and agentgateway/daemon can run on separate machines instead of all on one. 

@@ -234,11 +234,15 @@ if [[ -n "${transformation_rules}" ]]; then
 ${transformation_rules}"
 fi
 
-# Per-user limits are keyed on jwt.sub, the enrolling user's IdP subject
-# (stable across that user's devices). Not jwt.email: the controller only sets
-# it when Entra's token has an email claim, which needs the user's `mail`
-# attribute - 05-pilot-user.sh never sets it - and keyless requests would all
-# share one bucket.
+# Per-user limits and the access log's user field are keyed on jwt.sub, the
+# enrolling user's IdP subject (stable across that user's devices). Not
+# jwt.email: the controller only sets it when Entra's token has an email claim,
+# which needs the user's `mail` attribute - 05-pilot-user.sh never sets it - and
+# keyless requests would all share one bucket.
+# The request limit is low enough to trip on purpose during a demo; the token
+# budget is sized to survive a real agentic session (a single turn can carry
+# 10-30k prompt tokens). Buckets are in-memory: restarting the container resets
+# them.
 mkdir -p "${config_dir}"
 cat > "${config_dir}/agentgateway.yaml" <<EOF
 # yaml-language-server: \$schema=https://agentgateway.dev/schema/config
@@ -246,7 +250,7 @@ frontendPolicies:
   logging:
     add:
       llm.client: jwt.client_id
-      user: jwt.email
+      user: jwt.sub
 gateways:
   gateway:
     port: 4000
@@ -275,8 +279,8 @@ ${transformations_block}    localRateLimit:
       fillInterval: 60s
       key: jwt.sub
     - type: tokens
-      maxTokens: 50000
-      tokensPerFill: 50000
+      maxTokens: 300000
+      tokensPerFill: 300000
       fillInterval: 1h
       key: jwt.sub
   models:
