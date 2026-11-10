@@ -65,6 +65,8 @@ After `controller-up` finishes, run `scripts/22-export-controller-ca.sh` on the 
 
 In subscription mode (the default), once the daemon has enrolled and applied its configuration, the pilot operator signs into Claude.ai and/or ChatGPT in a browser when agentdesktop's checklist/UI prompts for it - a manual step, same as the Entra ID sign-in during enrollment. This isn't needed in api-key mode.
 
+Caution on Codex subscription mode: upstream flags routing a real ChatGPT subscription through agentdesktop/agentgateway as unvalidated against a real paid account beyond its own test fixtures, and whether it complies with OpenAI's terms for production or commercial use is unsettled. Treat it as a demo path only.
+
 ## Teardown
 
 ```
